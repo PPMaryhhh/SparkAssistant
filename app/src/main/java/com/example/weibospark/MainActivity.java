@@ -32,6 +32,7 @@ public class MainActivity extends Activity {
     static final String KEY_COMMENT_ENTRY_ID = "learned_comment_entry_id";
     static final String KEY_COMMENT_INPUT_ID = "learned_comment_input_id";
     static final String KEY_COMMENT_SEND_ID = "learned_comment_send_id";
+    static final String KEY_LAST_ERROR = "last_service_error";
 
     private SharedPreferences preferences;
     private EditText messageInput;
@@ -40,6 +41,7 @@ public class MainActivity extends Activity {
     private EditText limitInput;
     private TextView serviceStatus;
     private TextView learningStatus;
+    private TextView errorStatus;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -73,6 +75,9 @@ public class MainActivity extends Activity {
         learningStatus = text("", 15, Color.DKGRAY);
         statusCard.addView(serviceStatus);
         statusCard.addView(learningStatus);
+        errorStatus = text("", 13, Color.rgb(180, 40, 40));
+        errorStatus.setTextIsSelectable(true);
+        statusCard.addView(errorStatus);
         root.addView(statusCard);
 
         messageInput = setting(root,
@@ -217,6 +222,7 @@ public class MainActivity extends Activity {
                 .remove(KEY_COMMENT_ENTRY_ID)
                 .remove(KEY_COMMENT_INPUT_ID)
                 .remove(KEY_COMMENT_SEND_ID)
+                .remove(KEY_LAST_ERROR)
                 .apply();
         updateStatus();
         Toast.makeText(this, "已重置；下次启动会重新学习", Toast.LENGTH_SHORT).show();
@@ -240,6 +246,13 @@ public class MainActivity extends Activity {
                 ? "● 操作步骤：已学习，后续自动执行"
                 : "● 操作步骤：等待首次学习（首次仅确认两次）");
         learningStatus.setTextColor(learned ? Color.rgb(0, 130, 70) : Color.rgb(190, 110, 0));
+        String lastError = preferences.getString(KEY_LAST_ERROR, "").trim();
+        if (lastError.isEmpty()) {
+            errorStatus.setVisibility(View.GONE);
+        } else {
+            errorStatus.setVisibility(View.VISIBLE);
+            errorStatus.setText("\n最近一次服务错误（可长按复制）：\n" + lastError);
+        }
     }
 
     private int parseInt(String value, int fallback) {

@@ -8,6 +8,7 @@ import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -26,6 +27,7 @@ import java.util.Locale;
 import java.util.Set;
 
 public class SparkAccessibilityService extends AccessibilityService {
+    private static final String TAG = "WeiboSparkService";
     private enum State {
         IDLE, FIND_SPARK_CHAT, WAIT_CHAT_OPEN, SEND_MESSAGE,
         WAIT_FIRST_MESSAGE_CONFIRM, OPEN_PROFILE, OPEN_COMMENT, SEND_COMMENT,
@@ -49,17 +51,27 @@ public class SparkAccessibilityService extends AccessibilityService {
     @Override
     protected void onServiceConnected() {
         super.onServiceConnected();
-        AccessibilityServiceInfo info = getServiceInfo();
-        info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
-                | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
-        setServiceInfo(info);
-        showOverlay();
-        updateIdleText();
+        try {
+            AccessibilityServiceInfo info = getServiceInfo();
+            if (info != null) {
+                info.flags |= AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS
+                        | AccessibilityServiceInfo.FLAG_RETRIEVE_INTERACTIVE_WINDOWS;
+                setServiceInfo(info);
+            }
+            showOverlay();
+            updateIdleText();
+        } catch (Throwable error) {
+            handleFatalError("启动无障碍服务", error);
+        }
     }
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (isRunningStep()) scheduleStep(450);
+        try {
+            if (isRunningStep()) scheduleStep(450);
+        } catch (Throwable error) {
+            handleFatalError("接收微博页面事件", error);
+        }
     }
 
     @Override
@@ -70,7 +82,9 @@ public class SparkAccessibilityService extends AccessibilityService {
     @Override
     public void onDestroy() {
         handler.removeCallbacksAndMessages(null);
-        if (windowManager != null && overlay != null) windowManager.removeView(overlay);
+        try {
+            if (windowManager != null && overlay != null) windowManager.removeView(overlay);
+        } catch (Throwable ignored) { }
         super.onDestroy();
     }
 
@@ -118,7 +132,12 @@ public class SparkAccessibilityService extends AccessibilityService {
         params.gravity = Gravity.TOP | Gravity.END;
         params.x = dp(8);
         params.y = dp(72);
-        windowManager.addView(overlay, params);
+        try {
+            windowManager.addView(overlay, params);
+        } catch (Throwable error) {
+            overlay = null;
+            handleFatalError("显示控制浮窗", error);
+        }
     }
 
     private Button smallButton(String label) {
@@ -175,6 +194,14 @@ public class SparkAccessibilityService extends AccessibilityService {
     }
 
     private void runStep() {
+        try {
+            runStepSafely();
+        } catch (Throwable error) {
+            handleFatalError("执行步骤 " + stateLabel(state), error);
+        }
+    }
+
+    private void runStepSafely() {
         if (!isRunningStep()) return;
         if (!isWeiboForeground()) {
             pause("请切回微博，再点继续");
@@ -694,6 +721,33 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void setStatus(String value) {
         if (status != null) status.setText(value);
+    }
+
+    private void handleFatalError(String stage, Throwable error) {
+        Log.e(TAG, stage, error);
+        handler.removeCallbacks(stepRunnable);
+        stateBeforePause = state == State.IDLE ? State.FIND_SPARK_CHAT : state;
+        state = State.PAUSED;
+        StringBuilder detail = new StringBuilder();
+        detail.append(stage).append("：")
+                .append(error.getClass().getSimpleName());
+        if (error.getMessage() != null && !error.getMessage().trim().isEmpty()) {
+            detail.append(" - ").append(error.getMessage().trim());
+        }
+        int added = 0;
+        for (StackTraceElement element : error.getStackTrace()) {
+            if (element.getClassName().startsWith("com.example.weibospark")) {
+                detail.append("\n").append(element.getFileName())
+                        .append(":").append(element.getLineNumber());
+                if (++added >= 4) break;
+            }
+        }
+        String saved = detail.length() > 1800 ? detail.substring(0, 1800) : detail.toString();
+        getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
+                .putString(MainActivity.KEY_LAST_ERROR, saved).apply();
+        if (primary != null) primary.setText("继续/重试");
+        if (confirm != null) confirm.setVisibility(View.GONE);
+        setStatus("发生错误，已安全暂停。请回助手首页查看详情");
     }
 
     private String stateLabel(State value) {
