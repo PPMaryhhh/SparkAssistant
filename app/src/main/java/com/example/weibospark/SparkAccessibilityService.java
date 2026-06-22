@@ -594,7 +594,7 @@ public class SparkAccessibilityService extends AccessibilityService {
         return v.equals("消息") || v.equals("私信") || v.equals("发送") || v.equals("评论")
                 || v.equals("返回") || v.equals("未关注人消息") || v.contains("火花")
                 || v.contains("连续聊") || v.contains("分钟前") || v.contains("小时前")
-                || v.matches("[0-9:：/\-]+") || v.length() > 40;
+                || v.matches("[0-9:：/-]+") || v.length() > 40;
     }
 
     private boolean looksLikeMessageList(AccessibilityNodeInfo root) {
