@@ -39,6 +39,12 @@ jobs:
         with:
           gradle-version: "8.9"
 
+      - name: Restore stable debug signing key
+        uses: actions/cache@v4
+        with:
+          path: ~/.android/debug.keystore
+          key: weibo-spark-debug-keystore-v1
+
       - name: Build installable debug APK
         run: gradle --no-daemon --stacktrace :app:assembleDebug
 
@@ -48,4 +54,3 @@ jobs:
           name: WeiboSparkAssistant-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-
