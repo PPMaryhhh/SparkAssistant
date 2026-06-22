@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">微博火花助手</string>
+    <string name="accessibility_description">在用户确认后，辅助填写并发送续火花私信和主页评论。</string>
+</resources>
