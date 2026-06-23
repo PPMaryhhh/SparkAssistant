@@ -31,9 +31,9 @@ public class SparkAccessibilityService extends AccessibilityService {
     private static final String TAG = "WeiboMutualService";
 
     private enum State {
-        IDLE, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE,
-        CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, SEND_COMMENT,
-        RETURN_TO_LIST, PAUSED
+        IDLE, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE, CLICK_MESSAGE_SEND,
+        CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, OPEN_COMMENT_INPUT,
+        WAIT_COMMENT_INPUT, SEND_COMMENT, CLICK_COMMENT_SEND, RETURN_TO_LIST, PAUSED
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -69,11 +69,8 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        try {
-            if (state != State.IDLE && state != State.PAUSED) scheduleStep(450);
-        } catch (Throwable error) {
-            handleFatalError("接收微博页面事件", error);
-        }
+        // 每个动作都会安排下一步。这里不因页面刷新事件提前执行，避免输入文字后
+        // “发送/评论”按钮尚未生成就立即查找并误报失败。
     }
 
     @Override
@@ -174,10 +171,15 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         skippedThisSession.add(currentUser);
-        state = State.RETURN_TO_LIST;
-        backAttempts = 0;
-        setStatus("本轮跳过：“" + currentUser + "”，正在返回互关列表");
-        if (!looksLikeMutualList(getRootInActiveWindow())) performGlobalAction(GLOBAL_ACTION_BACK);
+        if (looksLikeMutualList(getRootInActiveWindow())) {
+            currentUser = "";
+            state = State.FIND_TARGET;
+            setStatus("本轮已跳过，继续下一位");
+        } else {
+            state = State.RETURN_TO_LIST;
+            backAttempts = 0;
+            setStatus("本轮跳过：“" + currentUser + "”，正在返回互关列表");
+        }
         scheduleStep(delayMs());
     }
 
@@ -211,7 +213,10 @@ public class SparkAccessibilityService extends AccessibilityService {
                 waitForChatInput();
                 break;
             case SEND_MESSAGE:
-                fillAndSendMessage();
+                fillMessage();
+                break;
+            case CLICK_MESSAGE_SEND:
+                clickMessageSend();
                 break;
             case CLOSE_KEYBOARD:
                 closeMessageKeyboard();
@@ -222,8 +227,17 @@ public class SparkAccessibilityService extends AccessibilityService {
             case OPEN_COMMENT:
                 openCommentComposer();
                 break;
+            case OPEN_COMMENT_INPUT:
+                openBottomCommentInput();
+                break;
+            case WAIT_COMMENT_INPUT:
+                waitForCommentInput();
+                break;
             case SEND_COMMENT:
-                fillAndSendComment();
+                fillComment();
+                break;
+            case CLICK_COMMENT_SEND:
+                clickCommentSend();
                 break;
             case RETURN_TO_LIST:
                 returnToMutualList();
@@ -299,7 +313,7 @@ public class SparkAccessibilityService extends AccessibilityService {
         }
     }
 
-    private void fillAndSendMessage() {
+    private void fillMessage() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID);
         if (edit == null || !setText(edit, prefString(MainActivity.KEY_MESSAGE, "续个火花✨"))) {
@@ -307,8 +321,15 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         rememberNodeId(MainActivity.KEY_MESSAGE_INPUT_ID, edit);
+        state = State.CLICK_MESSAGE_SEND;
+        setStatus("私信内容已输入，等待“发送”按钮出现…");
+        scheduleStep(Math.max(1200L, delayMs() / 2));
+    }
+
+    private void clickMessageSend() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
         if (!clickMessageSendButton(root)) {
-            pauseWithNext("没找到私信“发送”按钮，请调整页面后继续", State.SEND_MESSAGE);
+            pauseWithNext("输入完成后仍没找到私信“发送”按钮，请调整页面后继续", State.CLICK_MESSAGE_SEND);
             return;
         }
         state = State.CLOSE_KEYBOARD;
@@ -351,15 +372,44 @@ public class SparkAccessibilityService extends AccessibilityService {
         if (entry == null) entry = findCommentAction(root);
         if (entry != null && clickNode(entry)) {
             rememberNodeId(MainActivity.KEY_COMMENT_ENTRY_ID, entry);
-            state = State.SEND_COMMENT;
-            setStatus("评论入口已打开，正在填写评论");
+            state = State.OPEN_COMMENT_INPUT;
+            setStatus("微博已打开，下一步点击屏幕底部的消息/评论图标");
             scheduleStep(delayMs());
         } else {
             pauseWithNext("主页没有识别到可评论微博，请滚动主页后继续", State.OPEN_COMMENT);
         }
     }
 
-    private void fillAndSendComment() {
+    private void openBottomCommentInput() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo existing = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
+        if (existing != null) {
+            state = State.SEND_COMMENT;
+            scheduleStep(200);
+            return;
+        }
+        AccessibilityNodeInfo trigger = findBottomCommentInputTrigger(root);
+        if (trigger != null && clickNode(trigger)) {
+            state = State.WAIT_COMMENT_INPUT;
+            setStatus("已点击底部消息/评论图标，等待评论输入框出现…");
+            scheduleStep(delayMs());
+        } else {
+            pauseWithNext("没找到屏幕底部的消息/评论图标，请调整页面后继续", State.OPEN_COMMENT_INPUT);
+        }
+    }
+
+    private void waitForCommentInput() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
+        if (edit != null) {
+            state = State.SEND_COMMENT;
+            scheduleStep(200);
+        } else {
+            pauseWithNext("点击底部图标后仍未出现评论输入框，请调整页面后继续", State.OPEN_COMMENT_INPUT);
+        }
+    }
+
+    private void fillComment() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
         if (edit == null || !setText(edit, prefString(MainActivity.KEY_COMMENT, "踩踩宝贝"))) {
@@ -367,8 +417,16 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         rememberNodeId(MainActivity.KEY_COMMENT_INPUT_ID, edit);
+        state = State.CLICK_COMMENT_SEND;
+        setStatus("评论内容已输入，等待“评论”按钮出现…");
+        scheduleStep(Math.max(1200L, delayMs() / 2));
+    }
+
+    private void clickCommentSend() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
         if (!clickCommentSendButton(root, edit)) {
-            pauseWithNext("没找到提交评论的“评论”按钮，请调整页面后继续", State.SEND_COMMENT);
+            pauseWithNext("输入完成后没找到提交评论的“评论”按钮，请调整页面后继续", State.CLICK_COMMENT_SEND);
             return;
         }
         rememberProcessedToday(currentUser);
@@ -381,7 +439,8 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void returnToMutualList() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (looksLikeMutualList(root)) {
+        // 评论提交后至少返回一次，避免把好友主页上的关系按钮误判成列表。
+        if (backAttempts > 0 && looksLikeMutualList(root)) {
             currentUser = "";
             state = State.FIND_TARGET;
             backAttempts = 0;
@@ -471,6 +530,36 @@ public class SparkAccessibilityService extends AccessibilityService {
             }
         }
         return null;
+    }
+
+    private AccessibilityNodeInfo findBottomCommentInputTrigger(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (String label : new String[]{"写评论", "说点什么", "评论", "消息"}) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label)) {
+                AccessibilityNodeInfo clickable = findClickableAncestor(node, 4);
+                if (clickable == null || !clickable.isVisibleToUser()) continue;
+                Rect bounds = new Rect();
+                clickable.getBoundsInScreen(bounds);
+                if (bounds.centerY() < screenHeight * 0.62) continue;
+                int score = 0;
+                String text = nodeText(node).trim();
+                if (text.contains("写评论") || text.contains("说点什么")) score += 10;
+                if (text.contains("评论")) score += 7;
+                if (text.contains("消息")) score += 5;
+                if (bounds.centerX() > screenWidth * 0.18
+                        && bounds.centerX() < screenWidth * 0.82) score += 3;
+                if (bounds.centerY() > screenHeight * 0.78) score += 3;
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = node;
+                }
+            }
+        }
+        return best;
     }
 
     private boolean clickMessageSendButton(AccessibilityNodeInfo root) {
@@ -636,19 +725,24 @@ public class SparkAccessibilityService extends AccessibilityService {
     private boolean looksLikeMutualList(AccessibilityNodeInfo root) {
         if (root == null) return false;
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int rightSideBadgeCount = 0;
         for (String title : new String[]{"互相关注", "互关好友", "互关"}) {
             for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(title)) {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
                 if (!node.isVisibleToUser() || !nodeText(node).trim().contains(title)) continue;
                 // 兼容两种页面：顶部标题写“互相关注”，或每个好友右侧显示“互相关注”标识。
-                boolean topTitle = bounds.centerY() < dp(190);
+                boolean topTitle = bounds.centerY() < dp(190)
+                        && bounds.centerX() > screenWidth * 0.20
+                        && bounds.centerX() < screenWidth * 0.80;
                 boolean rightSideBadge = bounds.centerY() > dp(130)
                         && bounds.centerX() > screenWidth * 0.55;
-                if (topTitle || rightSideBadge) return true;
+                if (topTitle) return true;
+                if (rightSideBadge) rightSideBadgeCount++;
             }
         }
-        return false;
+        // 好友主页通常只有一个关系按钮；列表同屏通常会出现多个右侧标识。
+        return rightSideBadgeCount >= 2;
     }
 
     private boolean isKeyboardVisible() {
@@ -767,11 +861,15 @@ public class SparkAccessibilityService extends AccessibilityService {
             case FIND_TARGET: return "寻找下一位互关好友";
             case WAIT_PROFILE: return "打开好友主页和私信";
             case WAIT_CHAT: return "等待私信页";
-            case SEND_MESSAGE: return "发送私信";
+            case SEND_MESSAGE: return "填写私信";
+            case CLICK_MESSAGE_SEND: return "点击私信发送按钮";
             case CLOSE_KEYBOARD: return "关闭输入状态";
             case BACK_TO_PROFILE: return "返回好友主页";
             case OPEN_COMMENT: return "打开微博评论";
-            case SEND_COMMENT: return "发送评论";
+            case OPEN_COMMENT_INPUT: return "点击底部评论图标";
+            case WAIT_COMMENT_INPUT: return "等待评论输入框";
+            case SEND_COMMENT: return "填写评论";
+            case CLICK_COMMENT_SEND: return "点击评论按钮";
             case RETURN_TO_LIST: return "返回互关列表";
             default: return "继续执行";
         }
