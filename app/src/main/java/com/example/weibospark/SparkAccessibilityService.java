@@ -635,12 +635,17 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private boolean looksLikeMutualList(AccessibilityNodeInfo root) {
         if (root == null) return false;
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
         for (String title : new String[]{"互相关注", "互关好友", "互关"}) {
             for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(title)) {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
-                if (node.isVisibleToUser() && bounds.centerY() < dp(190)
-                        && nodeText(node).trim().contains(title)) return true;
+                if (!node.isVisibleToUser() || !nodeText(node).trim().contains(title)) continue;
+                // 兼容两种页面：顶部标题写“互相关注”，或每个好友右侧显示“互相关注”标识。
+                boolean topTitle = bounds.centerY() < dp(190);
+                boolean rightSideBadge = bounds.centerY() > dp(130)
+                        && bounds.centerX() > screenWidth * 0.55;
+                if (topTitle || rightSideBadge) return true;
             }
         }
         return false;
