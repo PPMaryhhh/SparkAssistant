@@ -646,8 +646,11 @@ public class SparkAccessibilityService extends AccessibilityService {
     private boolean tapBottomCommentFallback() {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
+        // 88% 在部分小米机型上仍位于内容/广告区域；下移到约 95%，但保留
+        // 至少 36dp 的系统导航安全距离。
+        float targetY = Math.min(height * 0.95f, height - dp(36));
         Path path = new Path();
-        path.moveTo(width * 0.50f, height * 0.88f);
+        path.moveTo(width * 0.50f, targetY);
         GestureDescription.StrokeDescription stroke =
                 new GestureDescription.StrokeDescription(path, 0, 80);
         GestureDescription gesture = new GestureDescription.Builder().addStroke(stroke).build();
