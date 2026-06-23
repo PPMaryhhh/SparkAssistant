@@ -185,7 +185,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             setStatus("首次消息已发送，正在学习主页入口…");
             scheduleStep(delayMs());
         } else if (state == State.WAIT_FIRST_COMMENT_CONFIRM) {
-            if (!clickSendButton(MainActivity.KEY_COMMENT_SEND_ID)) {
+            if (!clickCommentSendButton()) {
                 pauseWithNext("没找到评论发送按钮，请调整页面后重试", State.SEND_COMMENT);
                 return;
             }
@@ -358,7 +358,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             confirm.setText("首次确认评论");
             confirm.setVisibility(View.VISIBLE);
             setStatus("首次学习：核对主页留言，然后只确认这一次");
-        } else if (clickSendButton(MainActivity.KEY_COMMENT_SEND_ID)) {
+        } else if (clickCommentSendButton()) {
             finishCurrentUser(false);
         } else {
             pauseWithNext("没有找到评论发送按钮，请调整页面后继续", State.SEND_COMMENT);
@@ -516,6 +516,54 @@ public class SparkAccessibilityService extends AccessibilityService {
             return true;
         }
         return false;
+    }
+
+    private boolean clickCommentSendButton() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo button = findByLearnedId(root, MainActivity.KEY_COMMENT_SEND_ID);
+        if (button == null) {
+            button = findNodeByAnyText(root, "发送评论", "发布评论", "发送", "发布");
+        }
+        if (button == null) button = findBestCommentButton(root);
+        if (button != null && clickNode(button)) {
+            rememberNodeId(MainActivity.KEY_COMMENT_SEND_ID, button);
+            return true;
+        }
+        return false;
+    }
+
+    private AccessibilityNodeInfo findBestCommentButton(AccessibilityNodeInfo root) {
+        if (root == null) return null;
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
+        Rect editBounds = new Rect();
+        if (edit != null) edit.getBoundsInScreen(editBounds);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        AccessibilityNodeInfo best = null;
+        int bestScore = Integer.MIN_VALUE;
+        for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText("评论")) {
+            String label = nodeText(node).trim();
+            if (!(label.equals("评论") || label.equals("发送评论") || label.equals("发布评论"))) continue;
+            AccessibilityNodeInfo clickable = findClickableAncestor(node, 4);
+            if (clickable == null || !clickable.isVisibleToUser()) continue;
+            Rect bounds = new Rect();
+            clickable.getBoundsInScreen(bounds);
+            int score = 0;
+            if (bounds.centerX() > screenWidth * 0.60) score += 4;
+            if (bounds.centerY() < screenHeight * 0.28) score += 2;
+            if (!editBounds.isEmpty()) {
+                boolean verticalNear = bounds.bottom >= editBounds.top - dp(80)
+                        && bounds.top <= editBounds.bottom + dp(80);
+                if (verticalNear) score += 8;
+                if (bounds.left >= editBounds.centerX()) score += 3;
+            }
+            if (bounds.height() <= dp(80)) score += 1;
+            if (score > bestScore) {
+                bestScore = score;
+                best = node;
+            }
+        }
+        return best;
     }
 
     private AccessibilityNodeInfo findEditableLearned(AccessibilityNodeInfo root, String key) {
