@@ -2,7 +2,11 @@ package com.example.weibospark;
 
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.AccessibilityServiceInfo;
+import android.accessibilityservice.GestureDescription;
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.graphics.Color;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Bundle;
@@ -31,9 +35,10 @@ public class SparkAccessibilityService extends AccessibilityService {
     private static final String TAG = "WeiboMutualService";
 
     private enum State {
-        IDLE, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE, CLICK_MESSAGE_SEND,
+        IDLE, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE, VERIFY_MESSAGE_TEXT, CLICK_MESSAGE_SEND,
         CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, OPEN_COMMENT_INPUT,
-        WAIT_COMMENT_INPUT, SEND_COMMENT, CLICK_COMMENT_SEND, RETURN_TO_LIST, PAUSED
+        WAIT_COMMENT_INPUT, SEND_COMMENT, VERIFY_COMMENT_TEXT, CLICK_COMMENT_SEND,
+        RETURN_TO_LIST, PAUSED
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
@@ -49,6 +54,8 @@ public class SparkAccessibilityService extends AccessibilityService {
     private int sessionCount;
     private int backAttempts;
     private int scannedPages;
+    private boolean messagePasteTried;
+    private boolean commentPasteTried;
 
     @Override
     protected void onServiceConnected() {
@@ -150,6 +157,8 @@ public class SparkAccessibilityService extends AccessibilityService {
             backAttempts = 0;
             scannedPages = 0;
             currentUser = "";
+            messagePasteTried = false;
+            commentPasteTried = false;
             skippedThisSession.clear();
             state = State.FIND_TARGET;
             primary.setText("暂停");
@@ -215,6 +224,9 @@ public class SparkAccessibilityService extends AccessibilityService {
             case SEND_MESSAGE:
                 fillMessage();
                 break;
+            case VERIFY_MESSAGE_TEXT:
+                verifyMessageText();
+                break;
             case CLICK_MESSAGE_SEND:
                 clickMessageSend();
                 break;
@@ -235,6 +247,9 @@ public class SparkAccessibilityService extends AccessibilityService {
                 break;
             case SEND_COMMENT:
                 fillComment();
+                break;
+            case VERIFY_COMMENT_TEXT:
+                verifyCommentText();
                 break;
             case CLICK_COMMENT_SEND:
                 clickCommentSend();
@@ -316,14 +331,35 @@ public class SparkAccessibilityService extends AccessibilityService {
     private void fillMessage() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID);
-        if (edit == null || !setText(edit, prefString(MainActivity.KEY_MESSAGE, "续个火花✨"))) {
-            pauseWithNext("无法填写私信输入框，请调整页面后继续", State.SEND_MESSAGE);
+        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
+        if (edit == null || !focusAndSetText(edit, expected)) {
+            pauseWithNext("无法聚焦并填写私信输入框，请调整页面后继续", State.SEND_MESSAGE);
             return;
         }
         rememberNodeId(MainActivity.KEY_MESSAGE_INPUT_ID, edit);
-        state = State.CLICK_MESSAGE_SEND;
-        setStatus("私信内容已输入，等待“发送”按钮出现…");
-        scheduleStep(Math.max(1200L, delayMs() / 2));
+        messagePasteTried = false;
+        state = State.VERIFY_MESSAGE_TEXT;
+        setStatus("已请求输入私信，正在确认文字是否真正显示…");
+        scheduleStep(Math.max(1500L, delayMs() / 2));
+    }
+
+    private void verifyMessageText() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID);
+        if (textIsVisible(root, edit, expected)) {
+            state = State.CLICK_MESSAGE_SEND;
+            setStatus("已确认私信文字显示，等待“发送”按钮出现…");
+            scheduleStep(800);
+            return;
+        }
+        if (!messagePasteTried && edit != null && pasteText(edit, expected)) {
+            messagePasteTried = true;
+            setStatus("直接输入未生效，已改用粘贴，正在再次确认…");
+            scheduleStep(1500);
+            return;
+        }
+        pauseWithNext("私信文字没有真正进入输入框，请点一下输入框后继续", State.SEND_MESSAGE);
     }
 
     private void clickMessageSend() {
@@ -389,9 +425,13 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         AccessibilityNodeInfo trigger = findBottomCommentInputTrigger(root);
-        if (trigger != null && clickNode(trigger)) {
+        boolean clicked = trigger != null && clickNode(trigger);
+        if (!clicked) clicked = tapBottomCommentFallback();
+        if (clicked) {
             state = State.WAIT_COMMENT_INPUT;
-            setStatus("已点击底部消息/评论图标，等待评论输入框出现…");
+            setStatus(trigger != null
+                    ? "已点击底部消息/评论图标，等待评论输入框出现…"
+                    : "图标无文字描述，已点击底部中央位置，等待输入框出现…");
             scheduleStep(delayMs());
         } else {
             pauseWithNext("没找到屏幕底部的消息/评论图标，请调整页面后继续", State.OPEN_COMMENT_INPUT);
@@ -412,14 +452,35 @@ public class SparkAccessibilityService extends AccessibilityService {
     private void fillComment() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
-        if (edit == null || !setText(edit, prefString(MainActivity.KEY_COMMENT, "踩踩宝贝"))) {
-            pauseWithNext("没有识别到评论输入框，请点输入框后继续", State.SEND_COMMENT);
+        String expected = prefString(MainActivity.KEY_COMMENT, "踩踩宝贝");
+        if (edit == null || !focusAndSetText(edit, expected)) {
+            pauseWithNext("无法聚焦并填写评论输入框，请点输入框后继续", State.SEND_COMMENT);
             return;
         }
         rememberNodeId(MainActivity.KEY_COMMENT_INPUT_ID, edit);
-        state = State.CLICK_COMMENT_SEND;
-        setStatus("评论内容已输入，等待“评论”按钮出现…");
-        scheduleStep(Math.max(1200L, delayMs() / 2));
+        commentPasteTried = false;
+        state = State.VERIFY_COMMENT_TEXT;
+        setStatus("已请求输入评论，正在确认文字是否真正显示…");
+        scheduleStep(Math.max(1500L, delayMs() / 2));
+    }
+
+    private void verifyCommentText() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        String expected = prefString(MainActivity.KEY_COMMENT, "踩踩宝贝");
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
+        if (textIsVisible(root, edit, expected)) {
+            state = State.CLICK_COMMENT_SEND;
+            setStatus("已确认评论文字显示，等待“评论”按钮出现…");
+            scheduleStep(800);
+            return;
+        }
+        if (!commentPasteTried && edit != null && pasteText(edit, expected)) {
+            commentPasteTried = true;
+            setStatus("直接输入未生效，已改用粘贴，正在再次确认…");
+            scheduleStep(1500);
+            return;
+        }
+        pauseWithNext("评论文字没有真正进入输入框，请点一下输入框后继续", State.SEND_COMMENT);
     }
 
     private void clickCommentSend() {
@@ -559,7 +620,38 @@ public class SparkAccessibilityService extends AccessibilityService {
                 }
             }
         }
+        if (best != null) return best;
+
+        // 图标可能没有文字或内容描述：从底部工具栏的可点击小控件中选择最靠近中间的一个。
+        List<AccessibilityNodeInfo> clickable = new ArrayList<>();
+        collectClickable(root, clickable, 0);
+        for (AccessibilityNodeInfo node : clickable) {
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            if (bounds.centerY() < screenHeight * 0.70) continue;
+            if (bounds.width() > screenWidth * 0.42 || bounds.height() > dp(120)) continue;
+            String text = nodeText(node);
+            if (text.contains("转发") || text.contains("赞") || text.contains("收藏")) continue;
+            int score = 10 - (int) (Math.abs(bounds.centerX() - screenWidth * 0.50)
+                    / Math.max(1, screenWidth * 0.08));
+            if (bounds.centerY() > screenHeight * 0.82) score += 4;
+            if (score > bestScore) {
+                bestScore = score;
+                best = node;
+            }
+        }
         return best;
+    }
+
+    private boolean tapBottomCommentFallback() {
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        Path path = new Path();
+        path.moveTo(width * 0.50f, height * 0.88f);
+        GestureDescription.StrokeDescription stroke =
+                new GestureDescription.StrokeDescription(path, 0, 80);
+        GestureDescription gesture = new GestureDescription.Builder().addStroke(stroke).build();
+        return dispatchGesture(gesture, null, null);
     }
 
     private boolean clickMessageSendButton(AccessibilityNodeInfo root) {
@@ -694,6 +786,37 @@ public class SparkAccessibilityService extends AccessibilityService {
         Bundle args = new Bundle();
         args.putCharSequence(AccessibilityNodeInfo.ACTION_ARGUMENT_SET_TEXT_CHARSEQUENCE, value);
         return node.performAction(AccessibilityNodeInfo.ACTION_SET_TEXT, args);
+    }
+
+    private boolean focusAndSetText(AccessibilityNodeInfo node, String value) {
+        if (node == null) return false;
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        return setText(node, value);
+    }
+
+    private boolean pasteText(AccessibilityNodeInfo node, String value) {
+        if (node == null) return false;
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard == null) return false;
+        clipboard.setPrimaryClip(ClipData.newPlainText("微博助手输入", value));
+        node.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        node.performAction(AccessibilityNodeInfo.ACTION_FOCUS);
+        return node.performAction(AccessibilityNodeInfo.ACTION_PASTE);
+    }
+
+    private boolean textIsVisible(AccessibilityNodeInfo root,
+                                  AccessibilityNodeInfo edit, String expected) {
+        if (expected == null || expected.isEmpty()) return false;
+        if (edit != null && edit.getText() != null
+                && edit.getText().toString().contains(expected)) return true;
+        if (root == null) return false;
+        try {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(expected)) {
+                if (node.isVisibleToUser()) return true;
+            }
+        } catch (Throwable ignored) { }
+        return false;
     }
 
     private void collectText(AccessibilityNodeInfo node, List<String> result, int depth) {
@@ -862,6 +985,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             case WAIT_PROFILE: return "打开好友主页和私信";
             case WAIT_CHAT: return "等待私信页";
             case SEND_MESSAGE: return "填写私信";
+            case VERIFY_MESSAGE_TEXT: return "确认私信文字已显示";
             case CLICK_MESSAGE_SEND: return "点击私信发送按钮";
             case CLOSE_KEYBOARD: return "关闭输入状态";
             case BACK_TO_PROFILE: return "返回好友主页";
@@ -869,6 +993,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             case OPEN_COMMENT_INPUT: return "点击底部评论图标";
             case WAIT_COMMENT_INPUT: return "等待评论输入框";
             case SEND_COMMENT: return "填写评论";
+            case VERIFY_COMMENT_TEXT: return "确认评论文字已显示";
             case CLICK_COMMENT_SEND: return "点击评论按钮";
             case RETURN_TO_LIST: return "返回互关列表";
             default: return "继续执行";
