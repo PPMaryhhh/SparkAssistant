@@ -52,6 +52,7 @@ public class SparkAccessibilityService extends AccessibilityService {
     private LinearLayout overlay;
     private TextView status;
     private Button primary;
+    private Button secondary;
     private String currentUser = "";
     private int sessionCount;
     private int backAttempts;
@@ -125,12 +126,12 @@ public class SparkAccessibilityService extends AccessibilityService {
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         primary = smallButton("开始");
         primary.setOnClickListener(v -> onPrimary());
-        Button skip = smallButton("跳过此人");
-        skip.setOnClickListener(v -> skipCurrentUser());
+        secondary = smallButton("扫描名单");
+        secondary.setOnClickListener(v -> onSecondary());
         Button stop = smallButton("停止");
         stop.setOnClickListener(v -> stopTask("任务已停止"));
         buttons.addView(primary);
-        buttons.addView(skip);
+        buttons.addView(secondary);
         buttons.addView(stop);
         overlay.addView(buttons);
 
@@ -181,6 +182,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             lastScanFingerprint = "";
             state = scanMode ? State.SCAN_LIST : State.FIND_TARGET;
             primary.setText("暂停");
+            secondary.setText(scanMode ? "扫描中" : "跳过此人");
             setStatus(scanMode
                     ? "扫描模式：正在收集互关昵称和可见 ID，不会发送消息"
                     : "全自动模式：只处理已勾选且当天未完成的好友…");
@@ -192,6 +194,18 @@ public class SparkAccessibilityService extends AccessibilityService {
             scheduleStep(250);
         } else {
             pause("已暂停；调整页面后点继续");
+        }
+    }
+
+    private void onSecondary() {
+        if (state == State.IDLE) {
+            getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
+                    .putBoolean(MainActivity.KEY_SCAN_MODE, true)
+                    .remove(MainActivity.KEY_DISCOVERED_TARGETS)
+                    .apply();
+            onPrimary();
+        } else if (state != State.SCAN_LIST) {
+            skipCurrentUser();
         }
     }
 
@@ -345,13 +359,24 @@ public class SparkAccessibilityService extends AccessibilityService {
         }
         Set<String> discovered = new HashSet<>(getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
                 .getStringSet(MainActivity.KEY_DISCOVERED_TARGETS, new HashSet<>()));
+        int beforeCount = discovered.size();
+        int readableRows = 0;
         for (AccessibilityNodeInfo marker : findTargetMarkers(root)) {
             AccessibilityNodeInfo row = findLikelyRow(marker);
             String name = extractUserLabel(row);
-            if (!name.isEmpty()) discovered.add(name + "\t" + extractVisibleId(row, name));
+            if (!name.isEmpty()) {
+                readableRows++;
+                discovered.add(name + "\t" + extractVisibleId(row, name));
+            }
         }
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                 .putStringSet(MainActivity.KEY_DISCOVERED_TARGETS, discovered).apply();
+
+        if (scannedPages == 0 && beforeCount == 0 && readableRows == 0) {
+            pauseWithNext("已识别为互关列表，但当前屏读不到任何好友昵称；请确认使用官方微博 App并把列表截图发来",
+                    State.SCAN_LIST);
+            return;
+        }
 
         String fingerprint = pageFingerprint(root);
         if (!lastScanFingerprint.isEmpty() && lastScanFingerprint.equals(fingerprint)) {
@@ -1116,6 +1141,7 @@ public class SparkAccessibilityService extends AccessibilityService {
                     .putBoolean(MainActivity.KEY_SCAN_MODE, false).apply();
         }
         if (primary != null) primary.setText("开始");
+        if (secondary != null) secondary.setText("扫描名单");
         setStatus(reason);
     }
 

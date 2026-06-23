@@ -5,7 +5,6 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
-import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.text.InputType;
@@ -276,7 +275,7 @@ public class MainActivity extends Activity {
         saveSettings();
         Intent launch = getPackageManager().getLaunchIntentForPackage("com.sina.weibo");
         if (launch != null) startActivity(launch);
-        else startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://weibo.com")));
+        else Toast.makeText(this, "未找到官方微博 App，不会跳转网页版", Toast.LENGTH_LONG).show();
     }
 
     private void startTargetScan() {
@@ -285,8 +284,10 @@ public class MainActivity extends Activity {
                 .putBoolean(KEY_SCAN_MODE, true)
                 .remove(KEY_DISCOVERED_TARGETS)
                 .apply();
-        Toast.makeText(this, "请进入微博互关列表，再点浮窗“开始扫描”", Toast.LENGTH_LONG).show();
-        openWeibo();
+        Toast.makeText(this, "扫描模式已开启：请回到刚才打开的微博互关界面，再点浮窗“开始扫描”",
+                Toast.LENGTH_LONG).show();
+        // 不重新启动微博，也不打开网页；将本 App 放到后台，露出用户原先保持的微博页面。
+        moveTaskToBack(true);
     }
 
     private void renderTargetList() {
