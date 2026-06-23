@@ -14,6 +14,7 @@ import android.view.View;
 import android.view.WindowManager;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.TextView;
@@ -27,22 +28,23 @@ import java.util.Locale;
 import java.util.Set;
 
 public class SparkAccessibilityService extends AccessibilityService {
-    private static final String TAG = "WeiboSparkService";
+    private static final String TAG = "WeiboMutualService";
+
     private enum State {
-        IDLE, FIND_SPARK_CHAT, WAIT_CHAT_OPEN, SEND_MESSAGE,
-        WAIT_FIRST_MESSAGE_CONFIRM, OPEN_PROFILE, OPEN_COMMENT, SEND_COMMENT,
-        WAIT_FIRST_COMMENT_CONFIRM, RETURN_MESSAGES, PAUSED
+        IDLE, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE,
+        CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, SEND_COMMENT,
+        RETURN_TO_LIST, PAUSED
     }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable stepRunnable = this::runStep;
+    private final Set<String> skippedThisSession = new HashSet<>();
     private State state = State.IDLE;
-    private State stateBeforePause = State.FIND_SPARK_CHAT;
+    private State stateBeforePause = State.FIND_TARGET;
     private WindowManager windowManager;
     private LinearLayout overlay;
     private TextView status;
     private Button primary;
-    private Button confirm;
     private String currentUser = "";
     private int sessionCount;
     private int backAttempts;
@@ -59,7 +61,7 @@ public class SparkAccessibilityService extends AccessibilityService {
                 setServiceInfo(info);
             }
             showOverlay();
-            updateIdleText();
+            setStatus("请进入微博“互相关注”列表后点开始");
         } catch (Throwable error) {
             handleFatalError("启动无障碍服务", error);
         }
@@ -68,7 +70,7 @@ public class SparkAccessibilityService extends AccessibilityService {
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
         try {
-            if (isRunningStep()) scheduleStep(450);
+            if (state != State.IDLE && state != State.PAUSED) scheduleStep(450);
         } catch (Throwable error) {
             handleFatalError("接收微博页面事件", error);
         }
@@ -88,12 +90,6 @@ public class SparkAccessibilityService extends AccessibilityService {
         super.onDestroy();
     }
 
-    private boolean isRunningStep() {
-        return state != State.IDLE && state != State.PAUSED
-                && state != State.WAIT_FIRST_MESSAGE_CONFIRM
-                && state != State.WAIT_FIRST_COMMENT_CONFIRM;
-    }
-
     private void showOverlay() {
         if (overlay != null) return;
         windowManager = (WindowManager) getSystemService(WINDOW_SERVICE);
@@ -106,20 +102,19 @@ public class SparkAccessibilityService extends AccessibilityService {
         status.setTextColor(Color.WHITE);
         status.setTextSize(13);
         status.setMaxLines(4);
-        overlay.addView(status, new LinearLayout.LayoutParams(dp(260),
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        overlay.addView(status, new LinearLayout.LayoutParams(
+                dp(270), LinearLayout.LayoutParams.WRAP_CONTENT));
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
         primary = smallButton("开始");
         primary.setOnClickListener(v -> onPrimary());
-        confirm = smallButton("首次确认");
-        confirm.setVisibility(View.GONE);
-        confirm.setOnClickListener(v -> onFirstConfirm());
+        Button skip = smallButton("跳过此人");
+        skip.setOnClickListener(v -> skipCurrentUser());
         Button stop = smallButton("停止");
         stop.setOnClickListener(v -> stopTask("任务已停止"));
         buttons.addView(primary);
-        buttons.addView(confirm);
+        buttons.addView(skip);
         buttons.addView(stop);
         overlay.addView(buttons);
 
@@ -158,11 +153,10 @@ public class SparkAccessibilityService extends AccessibilityService {
             backAttempts = 0;
             scannedPages = 0;
             currentUser = "";
-            state = State.FIND_SPARK_CHAT;
+            skippedThisSession.clear();
+            state = State.FIND_TARGET;
             primary.setText("暂停");
-            setStatus(isCalibrated()
-                    ? "自动模式：正在消息页寻找火花会话…"
-                    : "学习模式：请选择消息页，首次流程只确认两次");
+            setStatus("全自动模式：正在寻找当天未处理的互关好友…");
             scheduleStep(250);
         } else if (state == State.PAUSED) {
             state = stateBeforePause;
@@ -170,27 +164,21 @@ public class SparkAccessibilityService extends AccessibilityService {
             setStatus("继续：" + stateLabel(state));
             scheduleStep(250);
         } else {
-            pause("已暂停；调整微博页面后可继续");
+            pause("已暂停；调整页面后点继续");
         }
     }
 
-    private void onFirstConfirm() {
-        confirm.setVisibility(View.GONE);
-        if (state == State.WAIT_FIRST_MESSAGE_CONFIRM) {
-            if (!clickSendButton(MainActivity.KEY_MESSAGE_SEND_ID)) {
-                pauseWithNext("没找到消息发送按钮，请点输入框后重试", State.SEND_MESSAGE);
-                return;
-            }
-            state = State.OPEN_PROFILE;
-            setStatus("首次消息已发送，正在学习主页入口…");
-            scheduleStep(delayMs());
-        } else if (state == State.WAIT_FIRST_COMMENT_CONFIRM) {
-            if (!clickCommentSendButton()) {
-                pauseWithNext("没找到评论发送按钮，请调整页面后重试", State.SEND_COMMENT);
-                return;
-            }
-            finishCurrentUser(true);
+    private void skipCurrentUser() {
+        if (currentUser.isEmpty()) {
+            setStatus("当前还没有打开好友，无法跳过");
+            return;
         }
+        skippedThisSession.add(currentUser);
+        state = State.RETURN_TO_LIST;
+        backAttempts = 0;
+        setStatus("本轮跳过：“" + currentUser + "”，正在返回互关列表");
+        if (!looksLikeMutualList(getRootInActiveWindow())) performGlobalAction(GLOBAL_ACTION_BACK);
+        scheduleStep(delayMs());
     }
 
     private void runStep() {
@@ -202,27 +190,34 @@ public class SparkAccessibilityService extends AccessibilityService {
     }
 
     private void runStepSafely() {
-        if (!isRunningStep()) return;
+        if (state == State.IDLE || state == State.PAUSED) return;
         if (!isWeiboForeground()) {
             pause("请切回微博，再点继续");
             return;
         }
-        if (sessionCount >= sessionLimit()) {
-            stopTask("已完成本轮上限 " + sessionCount + " 人");
+        int limit = sessionLimit();
+        if (limit > 0 && sessionCount >= limit) {
+            stopTask("已达到本轮上限 " + sessionCount + " 人");
             return;
         }
         switch (state) {
-            case FIND_SPARK_CHAT:
-                findAndOpenSparkChat();
+            case FIND_TARGET:
+                findAndOpenTarget();
                 break;
-            case WAIT_CHAT_OPEN:
-                waitForChat();
+            case WAIT_PROFILE:
+                openPrivateChat();
+                break;
+            case WAIT_CHAT:
+                waitForChatInput();
                 break;
             case SEND_MESSAGE:
                 fillAndSendMessage();
                 break;
-            case OPEN_PROFILE:
-                openProfileFromChat();
+            case CLOSE_KEYBOARD:
+                closeMessageKeyboard();
+                break;
+            case BACK_TO_PROFILE:
+                backToProfile();
                 break;
             case OPEN_COMMENT:
                 openCommentComposer();
@@ -230,68 +225,77 @@ public class SparkAccessibilityService extends AccessibilityService {
             case SEND_COMMENT:
                 fillAndSendComment();
                 break;
-            case RETURN_MESSAGES:
-                returnToMessages();
+            case RETURN_TO_LIST:
+                returnToMutualList();
                 break;
             default:
                 break;
         }
     }
 
-    private void findAndOpenSparkChat() {
+    private void findAndOpenTarget() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         if (root == null) {
             pause("暂时读不到微博页面，请重试");
             return;
         }
-
-        // 允许用户在图标暂时无法识别时手动进入一个火花会话继续学习。
-        if (findEditable(root) != null && !looksLikeMessageList(root)) {
-            currentUser = extractChatTitle(root);
-            state = State.SEND_MESSAGE;
-            setStatus("检测到已打开聊天：" + currentUser);
-            scheduleStep(300);
+        if (!looksLikeMutualList(root)) {
+            pause("当前不是“互相关注”列表，请进入列表后继续");
             return;
         }
 
-        List<AccessibilityNodeInfo> markers = findSparkMarkers(root);
         Set<String> processed = getProcessedToday();
+        List<AccessibilityNodeInfo> markers = findTargetMarkers(root);
+        int identifiedRows = 0;
         for (AccessibilityNodeInfo marker : markers) {
             AccessibilityNodeInfo row = findLikelyRow(marker);
             String user = extractUserLabel(row);
-            if (user.isEmpty() || processed.contains(todayKey(user))) continue;
-            AccessibilityNodeInfo clickTarget = findClickableAncestor(row, 5);
-            if (clickTarget == null) clickTarget = findClickableAncestor(marker, 6);
-            if (clickTarget != null && clickTarget.performAction(AccessibilityNodeInfo.ACTION_CLICK)) {
-                rememberNodeId(MainActivity.KEY_SPARK_MARKER_ID, marker);
+            if (user.isEmpty()) continue;
+            identifiedRows++;
+            if (processed.contains(todayKey(user)) || skippedThisSession.contains(user)) continue;
+            AccessibilityNodeInfo target = findProfileClickTarget(row, marker);
+            if (target != null && clickNode(target)) {
                 currentUser = user;
-                state = State.WAIT_CHAT_OPEN;
-                setStatus("发现火花会话：“" + user + "”，正在打开");
+                state = State.WAIT_PROFILE;
+                setStatus("正在处理：“" + user + "” → 打开主页");
                 scheduleStep(delayMs());
                 return;
             }
         }
 
         AccessibilityNodeInfo scrollable = findScrollable(root);
-        if (scrollable != null && scannedPages < 20
+        if (scrollable != null && scannedPages < 60
                 && scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
             scannedPages++;
-            setStatus("本屏没有新的火花会话，继续向下检查…");
+            setStatus("本屏好友已处理，自动下滑继续查找…");
             scheduleStep(delayMs());
-        } else if (markers.isEmpty()) {
-            pause("没有读到火花标识。请停在微博消息列表；若图标无文字描述，可先手动打开一个火花聊天再继续");
+        } else if (!markers.isEmpty() && identifiedRows == 0) {
+            pause("看到互关列表，但无法读取好友昵称；请把页面截图发来适配");
         } else {
-            stopTask("消息列表已检查完成，本次共处理 " + sessionCount + " 人");
+            stopTask("互关列表已处理完成，本次成功 " + sessionCount + " 人");
         }
     }
 
-    private void waitForChat() {
+    private void openPrivateChat() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID) != null) {
+        AccessibilityNodeInfo button = findNodeByAnyText(root, "私信", "发私信", "聊天");
+        if (button != null && clickNode(button)) {
+            state = State.WAIT_CHAT;
+            setStatus("“" + currentUser + "”主页已打开，正在进入私信");
+            scheduleStep(delayMs());
+        } else {
+            pauseWithNext("主页没找到“私信”按钮，请调整页面后继续", State.WAIT_PROFILE);
+        }
+    }
+
+    private void waitForChatInput() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID);
+        if (edit != null) {
             state = State.SEND_MESSAGE;
             scheduleStep(200);
         } else {
-            pauseWithNext("聊天页没有识别到输入框，请点一下输入框后继续", State.SEND_MESSAGE);
+            pauseWithNext("私信页没找到输入框，请点一下输入区域后继续", State.WAIT_CHAT);
         }
     }
 
@@ -299,49 +303,59 @@ public class SparkAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID);
         if (edit == null || !setText(edit, prefString(MainActivity.KEY_MESSAGE, "续个火花✨"))) {
-            pauseWithNext("没有识别到消息输入框，请点输入框后继续", State.SEND_MESSAGE);
+            pauseWithNext("无法填写私信输入框，请调整页面后继续", State.SEND_MESSAGE);
             return;
         }
         rememberNodeId(MainActivity.KEY_MESSAGE_INPUT_ID, edit);
-        if (!isCalibrated()) {
-            state = State.WAIT_FIRST_MESSAGE_CONFIRM;
-            confirm.setText("首次确认消息");
-            confirm.setVisibility(View.VISIBLE);
-            setStatus("首次学习：核对给“" + currentUser + "”的消息，然后只确认这一次");
-        } else if (clickSendButton(MainActivity.KEY_MESSAGE_SEND_ID)) {
-            state = State.OPEN_PROFILE;
-            setStatus("消息已自动发送，正在进入“" + currentUser + "”主页");
-            scheduleStep(delayMs());
-        } else {
-            pauseWithNext("没有找到消息发送按钮，请调整页面后继续", State.SEND_MESSAGE);
+        if (!clickMessageSendButton(root)) {
+            pauseWithNext("没找到私信“发送”按钮，请调整页面后继续", State.SEND_MESSAGE);
+            return;
         }
+        state = State.CLOSE_KEYBOARD;
+        setStatus("私信已发送，正在关闭输入状态并返回主页");
+        scheduleStep(delayMs());
     }
 
-    private void openProfileFromChat() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        AccessibilityNodeInfo entry = findByLearnedId(root, MainActivity.KEY_PROFILE_ENTRY_ID);
-        if (entry == null) entry = findProfileHeader(root);
-        if (entry != null && clickNode(entry)) {
-            rememberNodeId(MainActivity.KEY_PROFILE_ENTRY_ID, entry);
-            state = State.OPEN_COMMENT;
-            setStatus("主页已打开，寻找第一条评论入口…");
+    private void closeMessageKeyboard() {
+        if (isKeyboardVisible()) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            setStatus("已关闭输入状态，下一步返回好友主页");
             scheduleStep(delayMs());
-        } else {
-            pauseWithNext("没有识别到聊天页顶部头像/昵称，请手动点进主页后继续", State.OPEN_COMMENT);
+            return;
         }
+        state = State.BACK_TO_PROFILE;
+        scheduleStep(250);
+    }
+
+    private void backToProfile() {
+        if (isKeyboardVisible()) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            scheduleStep(delayMs());
+            return;
+        }
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        state = State.OPEN_COMMENT;
+        setStatus("已退出私信，正在主页寻找可评论微博");
+        scheduleStep(delayMs());
     }
 
     private void openCommentComposer() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (findEditableLearned(root, MainActivity.KEY_MESSAGE_INPUT_ID) != null) {
+            performGlobalAction(GLOBAL_ACTION_BACK);
+            setStatus("仍在私信页，再返回一次主页…");
+            scheduleStep(delayMs());
+            return;
+        }
         AccessibilityNodeInfo entry = findByLearnedId(root, MainActivity.KEY_COMMENT_ENTRY_ID);
         if (entry == null) entry = findCommentAction(root);
         if (entry != null && clickNode(entry)) {
             rememberNodeId(MainActivity.KEY_COMMENT_ENTRY_ID, entry);
             state = State.SEND_COMMENT;
-            setStatus("评论入口已打开，正在填写主页留言…");
+            setStatus("评论入口已打开，正在填写评论");
             scheduleStep(delayMs());
         } else {
-            pauseWithNext("主页没有识别到评论入口，请滚到任意微博后继续", State.OPEN_COMMENT);
+            pauseWithNext("主页没有识别到可评论微博，请滚动主页后继续", State.OPEN_COMMENT);
         }
     }
 
@@ -353,44 +367,30 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         rememberNodeId(MainActivity.KEY_COMMENT_INPUT_ID, edit);
-        if (!isCalibrated()) {
-            state = State.WAIT_FIRST_COMMENT_CONFIRM;
-            confirm.setText("首次确认评论");
-            confirm.setVisibility(View.VISIBLE);
-            setStatus("首次学习：核对主页留言，然后只确认这一次");
-        } else if (clickCommentSendButton()) {
-            finishCurrentUser(false);
-        } else {
-            pauseWithNext("没有找到评论发送按钮，请调整页面后继续", State.SEND_COMMENT);
+        if (!clickCommentSendButton(root, edit)) {
+            pauseWithNext("没找到提交评论的“评论”按钮，请调整页面后继续", State.SEND_COMMENT);
+            return;
         }
-    }
-
-    private void finishCurrentUser(boolean firstLearning) {
         rememberProcessedToday(currentUser);
         sessionCount++;
-        if (firstLearning) {
-            getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
-                    .putBoolean(MainActivity.KEY_CALIBRATED, true).apply();
-        }
-        state = State.RETURN_MESSAGES;
+        state = State.RETURN_TO_LIST;
         backAttempts = 0;
-        setStatus((firstLearning ? "学习完成；以后自动执行。" : "已自动完成。")
-                + "正在返回消息列表（本次 " + sessionCount + " 人）");
+        setStatus("已完成：“" + currentUser + "”（本次 " + sessionCount + " 人），正在返回互关列表");
         scheduleStep(delayMs());
     }
 
-    private void returnToMessages() {
+    private void returnToMutualList() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (looksLikeMessageList(root)) {
-            state = State.FIND_SPARK_CHAT;
+        if (looksLikeMutualList(root)) {
+            currentUser = "";
+            state = State.FIND_TARGET;
             backAttempts = 0;
-            scannedPages = 0;
-            setStatus("已自动回到消息列表，寻找下一位…");
+            setStatus("已回到互关列表，继续下一位…");
             scheduleStep(delayMs());
             return;
         }
-        if (backAttempts >= 6) {
-            pauseWithNext("没能自动回到消息列表，请手动返回“消息”后继续", State.FIND_SPARK_CHAT);
+        if (backAttempts >= 7) {
+            pauseWithNext("无法自动返回互关列表，请手动返回后继续", State.FIND_TARGET);
             return;
         }
         backAttempts++;
@@ -398,37 +398,16 @@ public class SparkAccessibilityService extends AccessibilityService {
         scheduleStep(delayMs());
     }
 
-    private List<AccessibilityNodeInfo> findSparkMarkers(AccessibilityNodeInfo root) {
+    private List<AccessibilityNodeInfo> findTargetMarkers(AccessibilityNodeInfo root) {
         List<AccessibilityNodeInfo> result = new ArrayList<>();
-        String learnedId = prefString(MainActivity.KEY_SPARK_MARKER_ID, "");
-        if (!learnedId.isEmpty()) {
-            try {
-                for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByViewId(learnedId)) {
-                    // 同一个 View ID 可能被所有消息行复用，仍必须核对火花描述，避免误发。
-                    if (containsSparkDescriptor(nodeText(node))) result.add(node);
-                }
+        for (String label : new String[]{"私信", "已关注", "互相关注"}) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label)) {
+                Rect bounds = new Rect();
+                node.getBoundsInScreen(bounds);
+                if (node.isVisibleToUser() && bounds.centerY() > dp(130)) result.add(node);
             }
-            catch (Exception ignored) { }
         }
-        collectSparkMarkers(root, result, 0);
         return result;
-    }
-
-    private void collectSparkMarkers(AccessibilityNodeInfo node,
-                                     List<AccessibilityNodeInfo> result, int depth) {
-        if (node == null || depth > 18) return;
-        if (containsSparkDescriptor(nodeText(node))) {
-            if (!result.contains(node)) result.add(node);
-        }
-        for (int i = 0; i < node.getChildCount(); i++) {
-            collectSparkMarkers(node.getChild(i), result, depth + 1);
-        }
-    }
-
-    private boolean containsSparkDescriptor(String raw) {
-        String value = raw.toLowerCase(Locale.ROOT);
-        return value.contains("火花") || value.contains("🔥") || value.contains("连续聊")
-                || value.contains("续火") || value.contains("spark");
     }
 
     private AccessibilityNodeInfo findLikelyRow(AccessibilityNodeInfo node) {
@@ -448,56 +427,43 @@ public class SparkAccessibilityService extends AccessibilityService {
         List<String> values = new ArrayList<>();
         collectText(row, values, 0);
         for (String value : values) {
-            String clean = value.trim();
-            if (clean.length() < 1 || clean.length() > 40 || isCommonLabel(clean)) continue;
+            String clean = value.trim().replace("的头像", "").replace("头像", "");
+            if (clean.length() < 1 || clean.length() > 40 || isCommonListLabel(clean)) continue;
             return clean;
         }
         return "";
     }
 
-    private String extractChatTitle(AccessibilityNodeInfo root) {
-        List<AccessibilityNodeInfo> top = new ArrayList<>();
-        collectTopNodes(root, top, 0);
-        for (AccessibilityNodeInfo node : top) {
-            String value = nodeText(node).trim();
-            if (!value.isEmpty() && !isCommonLabel(value)) return value;
-        }
-        return "当前火花联系人";
-    }
-
-    private AccessibilityNodeInfo findProfileHeader(AccessibilityNodeInfo root) {
-        List<AccessibilityNodeInfo> top = new ArrayList<>();
-        collectTopNodes(root, top, 0);
-        for (AccessibilityNodeInfo node : top) {
-            if (!currentUser.isEmpty() && nodeText(node).contains(currentUser)
-                    && findClickableAncestor(node, 3) != null) return node;
-        }
-        for (AccessibilityNodeInfo node : top) {
+    private AccessibilityNodeInfo findProfileClickTarget(AccessibilityNodeInfo row,
+                                                          AccessibilityNodeInfo marker) {
+        List<AccessibilityNodeInfo> clickable = new ArrayList<>();
+        collectClickable(row, clickable, 0);
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        for (AccessibilityNodeInfo node : clickable) {
             Rect bounds = new Rect();
             node.getBoundsInScreen(bounds);
-            String value = nodeText(node);
-            if (bounds.centerX() > getResources().getDisplayMetrics().widthPixels * 0.22
-                    && !value.contains("返回") && findClickableAncestor(node, 3) != null) return node;
+            String text = nodeText(node);
+            if (bounds.centerX() < screenWidth * 0.70
+                    && !text.contains("私信") && !text.contains("关注") && node != marker) return node;
         }
+        if (row.isClickable() && !nodeText(row).trim().equals("私信")) return row;
         return null;
     }
 
-    private void collectTopNodes(AccessibilityNodeInfo node,
-                                 List<AccessibilityNodeInfo> result, int depth) {
-        if (node == null || depth > 10) return;
-        Rect bounds = new Rect();
-        node.getBoundsInScreen(bounds);
-        if (node.isVisibleToUser() && bounds.centerY() > dp(25) && bounds.centerY() < dp(180)
-                && (!nodeText(node).trim().isEmpty() || node.isClickable())) result.add(node);
-        for (int i = 0; i < node.getChildCount(); i++) collectTopNodes(node.getChild(i), result, depth + 1);
+    private void collectClickable(AccessibilityNodeInfo node,
+                                  List<AccessibilityNodeInfo> result, int depth) {
+        if (node == null || depth > 6) return;
+        if (node.isVisibleToUser() && node.isClickable()) result.add(node);
+        for (int i = 0; i < node.getChildCount(); i++) {
+            collectClickable(node.getChild(i), result, depth + 1);
+        }
     }
 
     private AccessibilityNodeInfo findCommentAction(AccessibilityNodeInfo root) {
         if (root == null) return null;
         int minY = getResources().getDisplayMetrics().heightPixels / 3;
         for (String label : new String[]{"评论", "Comment"}) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-            for (AccessibilityNodeInfo node : nodes) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label)) {
                 Rect bounds = new Rect();
                 node.getBoundsInScreen(bounds);
                 if (node.isVisibleToUser() && bounds.centerY() > minY
@@ -507,24 +473,20 @@ public class SparkAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private boolean clickSendButton(String learnedKey) {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        AccessibilityNodeInfo button = findByLearnedId(root, learnedKey);
-        if (button == null) button = findNodeByAnyText(root, "发送", "发布", "Send");
+    private boolean clickMessageSendButton(AccessibilityNodeInfo root) {
+        AccessibilityNodeInfo button = findByLearnedId(root, MainActivity.KEY_MESSAGE_SEND_ID);
+        if (button == null) button = findNodeByAnyText(root, "发送", "Send");
         if (button != null && clickNode(button)) {
-            rememberNodeId(learnedKey, button);
+            rememberNodeId(MainActivity.KEY_MESSAGE_SEND_ID, button);
             return true;
         }
         return false;
     }
 
-    private boolean clickCommentSendButton() {
-        AccessibilityNodeInfo root = getRootInActiveWindow();
+    private boolean clickCommentSendButton(AccessibilityNodeInfo root, AccessibilityNodeInfo edit) {
         AccessibilityNodeInfo button = findByLearnedId(root, MainActivity.KEY_COMMENT_SEND_ID);
-        if (button == null) {
-            button = findNodeByAnyText(root, "发送评论", "发布评论", "发送", "发布");
-        }
-        if (button == null) button = findBestCommentButton(root);
+        if (button == null) button = findNodeByAnyText(root, "发送评论", "发布评论", "发送", "发布");
+        if (button == null) button = findBestCommentButton(root, edit);
         if (button != null && clickNode(button)) {
             rememberNodeId(MainActivity.KEY_COMMENT_SEND_ID, button);
             return true;
@@ -532,9 +494,9 @@ public class SparkAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    private AccessibilityNodeInfo findBestCommentButton(AccessibilityNodeInfo root) {
+    private AccessibilityNodeInfo findBestCommentButton(AccessibilityNodeInfo root,
+                                                         AccessibilityNodeInfo edit) {
         if (root == null) return null;
-        AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
         Rect editBounds = new Rect();
         if (edit != null) edit.getBoundsInScreen(editBounds);
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
@@ -552,9 +514,8 @@ public class SparkAccessibilityService extends AccessibilityService {
             if (bounds.centerX() > screenWidth * 0.60) score += 4;
             if (bounds.centerY() < screenHeight * 0.28) score += 2;
             if (!editBounds.isEmpty()) {
-                boolean verticalNear = bounds.bottom >= editBounds.top - dp(80)
-                        && bounds.top <= editBounds.bottom + dp(80);
-                if (verticalNear) score += 8;
+                if (bounds.bottom >= editBounds.top - dp(80)
+                        && bounds.top <= editBounds.bottom + dp(80)) score += 8;
                 if (bounds.left >= editBounds.centerX()) score += 3;
             }
             if (bounds.height() <= dp(80)) score += 1;
@@ -576,8 +537,9 @@ public class SparkAccessibilityService extends AccessibilityService {
         String id = prefString(key, "");
         if (id.isEmpty()) return null;
         try {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByViewId(id);
-            for (AccessibilityNodeInfo node : nodes) if (node.isVisibleToUser()) return node;
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByViewId(id)) {
+                if (node.isVisibleToUser()) return node;
+            }
         } catch (Exception ignored) { }
         return null;
     }
@@ -597,8 +559,7 @@ public class SparkAccessibilityService extends AccessibilityService {
     private AccessibilityNodeInfo findNodeByAnyText(AccessibilityNodeInfo root, String... labels) {
         if (root == null) return null;
         for (String label : labels) {
-            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(label);
-            for (AccessibilityNodeInfo node : nodes) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(label)) {
                 if (node.isVisibleToUser() && findClickableAncestor(node, 4) != null) return node;
             }
         }
@@ -664,18 +625,34 @@ public class SparkAccessibilityService extends AccessibilityService {
         return value.toString();
     }
 
-    private boolean isCommonLabel(String value) {
+    private boolean isCommonListLabel(String value) {
         String v = value.toLowerCase(Locale.ROOT);
-        return v.equals("消息") || v.equals("私信") || v.equals("发送") || v.equals("评论")
-                || v.equals("返回") || v.equals("未关注人消息") || v.contains("火花")
-                || v.contains("连续聊") || v.contains("分钟前") || v.contains("小时前")
-                || v.matches("[0-9:：/-]+") || v.length() > 40;
+        return v.equals("私信") || v.equals("发私信") || v.equals("互相关注")
+                || v.equals("已关注") || v.equals("关注") || v.equals("粉丝")
+                || v.equals("微博") || v.equals("返回") || v.contains("分钟前")
+                || v.contains("小时前") || v.matches("[0-9:：/.-]+") || v.length() > 40;
     }
 
-    private boolean looksLikeMessageList(AccessibilityNodeInfo root) {
-        if (root == null || findEditable(root) != null) return false;
-        boolean hasMessage = !root.findAccessibilityNodeInfosByText("消息").isEmpty();
-        return hasMessage && findScrollable(root) != null;
+    private boolean looksLikeMutualList(AccessibilityNodeInfo root) {
+        if (root == null) return false;
+        for (String title : new String[]{"互相关注", "互关好友", "互关"}) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(title)) {
+                Rect bounds = new Rect();
+                node.getBoundsInScreen(bounds);
+                if (node.isVisibleToUser() && bounds.centerY() < dp(190)
+                        && nodeText(node).trim().contains(title)) return true;
+            }
+        }
+        return false;
+    }
+
+    private boolean isKeyboardVisible() {
+        try {
+            for (AccessibilityWindowInfo window : getWindows()) {
+                if (window.getType() == AccessibilityWindowInfo.TYPE_INPUT_METHOD) return true;
+            }
+        } catch (Throwable ignored) { }
+        return false;
     }
 
     private boolean isWeiboForeground() {
@@ -684,18 +661,13 @@ public class SparkAccessibilityService extends AccessibilityService {
                 && "com.sina.weibo".contentEquals(root.getPackageName());
     }
 
-    private boolean isCalibrated() {
-        return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                .getBoolean(MainActivity.KEY_CALIBRATED, false);
-    }
-
     private Set<String> getProcessedToday() {
         Set<String> saved = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
                 .getStringSet(MainActivity.KEY_PROCESSED, new HashSet<>());
-        Set<String> today = new HashSet<>();
+        Set<String> todayValues = new HashSet<>();
         String prefix = today() + "|";
-        for (String value : saved) if (value.startsWith(prefix)) today.add(value);
-        return today;
+        for (String value : saved) if (value.startsWith(prefix)) todayValues.add(value);
+        return todayValues;
     }
 
     private void rememberProcessedToday(String user) {
@@ -721,8 +693,7 @@ public class SparkAccessibilityService extends AccessibilityService {
     }
 
     private int sessionLimit() {
-        return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                .getInt(MainActivity.KEY_LIMIT, 20);
+        return getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).getInt(MainActivity.KEY_LIMIT, 0);
     }
 
     private long delayMs() {
@@ -735,14 +706,12 @@ public class SparkAccessibilityService extends AccessibilityService {
         stateBeforePause = next;
         state = State.PAUSED;
         handler.removeCallbacks(stepRunnable);
-        primary.setText("继续/重试");
-        confirm.setVisibility(View.GONE);
+        if (primary != null) primary.setText("继续/重试");
         setStatus(reason);
     }
 
     private void pause(String reason) {
-        State next = (state == State.IDLE || state == State.PAUSED)
-                ? State.FIND_SPARK_CHAT : state;
+        State next = (state == State.IDLE || state == State.PAUSED) ? State.FIND_TARGET : state;
         pauseWithNext(reason, next);
     }
 
@@ -750,16 +719,8 @@ public class SparkAccessibilityService extends AccessibilityService {
         state = State.IDLE;
         handler.removeCallbacks(stepRunnable);
         currentUser = "";
-        if (primary != null) primary.setText(isCalibrated() ? "开始续火花" : "开始学习");
-        if (confirm != null) confirm.setVisibility(View.GONE);
+        if (primary != null) primary.setText("开始");
         setStatus(reason);
-    }
-
-    private void updateIdleText() {
-        if (primary != null) primary.setText(isCalibrated() ? "开始续火花" : "开始学习");
-        setStatus(isCalibrated()
-                ? "已学习。请进入微博“消息”页后开始"
-                : "未学习。第一次成功后将自动记住操作步骤");
     }
 
     private void scheduleStep(long delay) {
@@ -774,11 +735,10 @@ public class SparkAccessibilityService extends AccessibilityService {
     private void handleFatalError(String stage, Throwable error) {
         Log.e(TAG, stage, error);
         handler.removeCallbacks(stepRunnable);
-        stateBeforePause = state == State.IDLE ? State.FIND_SPARK_CHAT : state;
+        stateBeforePause = state == State.IDLE ? State.FIND_TARGET : state;
         state = State.PAUSED;
         StringBuilder detail = new StringBuilder();
-        detail.append(stage).append("：")
-                .append(error.getClass().getSimpleName());
+        detail.append(stage).append("：").append(error.getClass().getSimpleName());
         if (error.getMessage() != null && !error.getMessage().trim().isEmpty()) {
             detail.append(" - ").append(error.getMessage().trim());
         }
@@ -794,19 +754,20 @@ public class SparkAccessibilityService extends AccessibilityService {
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                 .putString(MainActivity.KEY_LAST_ERROR, saved).apply();
         if (primary != null) primary.setText("继续/重试");
-        if (confirm != null) confirm.setVisibility(View.GONE);
         setStatus("发生错误，已安全暂停。请回助手首页查看详情");
     }
 
     private String stateLabel(State value) {
         switch (value) {
-            case FIND_SPARK_CHAT: return "寻找火花会话";
-            case WAIT_CHAT_OPEN: return "等待聊天页";
-            case SEND_MESSAGE: return "发送续火花消息";
-            case OPEN_PROFILE: return "进入对方主页";
-            case OPEN_COMMENT: return "打开评论入口";
-            case SEND_COMMENT: return "发送主页留言";
-            case RETURN_MESSAGES: return "返回消息列表";
+            case FIND_TARGET: return "寻找下一位互关好友";
+            case WAIT_PROFILE: return "打开好友主页和私信";
+            case WAIT_CHAT: return "等待私信页";
+            case SEND_MESSAGE: return "发送私信";
+            case CLOSE_KEYBOARD: return "关闭输入状态";
+            case BACK_TO_PROFILE: return "返回好友主页";
+            case OPEN_COMMENT: return "打开微博评论";
+            case SEND_COMMENT: return "发送评论";
+            case RETURN_TO_LIST: return "返回互关列表";
             default: return "继续执行";
         }
     }

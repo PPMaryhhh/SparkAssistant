@@ -22,7 +22,7 @@ public class MainActivity extends Activity {
     static final String KEY_MESSAGE = "spark_message";
     static final String KEY_COMMENT = "spark_comment";
     static final String KEY_DELAY = "step_delay_seconds";
-    static final String KEY_LIMIT = "session_limit";
+    static final String KEY_LIMIT = "mutual_session_limit";
     static final String KEY_PROCESSED = "processed_users";
     static final String KEY_CALIBRATED = "workflow_calibrated";
     static final String KEY_SPARK_MARKER_ID = "learned_spark_marker_id";
@@ -63,9 +63,9 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
         root.setBackgroundColor(Color.rgb(248, 248, 248));
 
-        root.addView(text("微博火花助手", 27, Color.rgb(28, 28, 30)));
+        root.addView(text("微博互关自动助手", 27, Color.rgb(28, 28, 30)));
         TextView subtitle = text(
-                "从微博“消息”页识别带火花标识的会话，自动续消息、进主页留言，再回到消息列表继续。",
+                "从“互相关注”列表逐人进入主页，自动私信、评论、返回列表并继续下滑。",
                 15, Color.DKGRAY);
         subtitle.setPadding(0, dp(6), 0, dp(12));
         root.addView(subtitle);
@@ -81,41 +81,39 @@ public class MainActivity extends Activity {
         root.addView(statusCard);
 
         messageInput = setting(root,
-                "① 续火花消息",
-                "自动发给消息列表中带火花标识的联系人。",
+                "① 自动私信内容",
+                "进入每位互关好友的私信页后自动发送。",
                 preferences.getString(KEY_MESSAGE, "续个火花✨"), false);
         commentInput = setting(root,
-                "② 主页留言",
-                "发完消息后，在对方主页第一条可评论微博下发送。",
+                "② 主页评论内容",
+                "私信完成后，在对方主页第一条可评论微博下发送。",
                 preferences.getString(KEY_COMMENT, "踩踩宝贝"), false);
         delayInput = setting(root,
                 "③ 每步等待时间（秒）",
                 "给微博页面加载留时间；小米建议 4～8 秒，太短容易点错。",
                 String.valueOf(preferences.getInt(KEY_DELAY, 5)), true);
         limitInput = setting(root,
-                "④ 本轮最多处理人数",
-                "达到数量后自动停止；下次启动会继续处理当天未完成的人。",
-                String.valueOf(preferences.getInt(KEY_LIMIT, 20)), true);
+                "④ 本轮最多处理人数（0 表示全部）",
+                "填 0 会一直处理到列表底部；当天已完成好友会自动跳过。",
+                String.valueOf(preferences.getInt(KEY_LIMIT, 0)), true);
 
         root.addView(primaryButton("保存以上设置", v -> saveSettings()));
         root.addView(button("开启/检查无障碍服务", v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
-        root.addView(button("打开微博（然后进入“消息”页）", v -> openWeibo()));
-        root.addView(button("重新学习微博操作步骤", v -> resetLearning()));
+        root.addView(button("打开微博（然后进入“互相关注”列表）", v -> openWeibo()));
+        root.addView(button("重置微博页面控件识别", v -> resetLearning()));
         root.addView(button("清空今天的已处理记录", v -> {
             preferences.edit().remove(KEY_PROCESSED).apply();
             Toast.makeText(this, "今天的记录已清空", Toast.LENGTH_SHORT).show();
         }));
 
         TextView guide = text(
-                "第一次使用\n\n" +
+                "使用方法\n\n" +
                 "1. 保存设置并开启无障碍服务。\n" +
-                "2. 打开微博底部“消息”，保证屏幕上能看到火花会话。\n" +
-                "3. 点浮窗“开始学习”。第一次私信和评论各确认一次，用来校准微博当前版本的按钮。\n" +
-                "4. 第一个人完成后显示“已学习”，后面的人将自动发送、自动评论、自动返回消息列表。\n\n" +
-                "以后使用\n\n" +
-                "进入微博消息页，点浮窗“开始续火花”即可。程序按当天去重；当天后来新增的火花联系人，再启动一次仍会被识别。\n\n" +
-                "如果微博升级后操作失效，点“重新学习微博操作步骤”再校准一次。",
+                "2. 在微博进入“互相关注”好友列表。\n" +
+                "3. 点浮窗“开始”，之后自动完成：好友主页 → 私信 → 关闭输入状态 → 返回主页 → 评论 → 返回互关列表。\n" +
+                "4. 当前屏好友处理完后自动下滑，直到列表底部或达到人数上限。\n\n" +
+                "浮窗可随时暂停、跳过当前好友或停止。已完成好友只在当天去重；第二天会自动重新开始全部好友。",
                 15, Color.DKGRAY);
         guide.setPadding(0, dp(20), 0, dp(36));
         root.addView(guide);
@@ -200,7 +198,7 @@ public class MainActivity extends Activity {
             return;
         }
         int delay = clamp(parseInt(delayInput.getText().toString(), 5), 3, 15);
-        int limit = clamp(parseInt(limitInput.getText().toString(), 20), 1, 50);
+        int limit = clamp(parseInt(limitInput.getText().toString(), 0), 0, 500);
         preferences.edit()
                 .putString(KEY_MESSAGE, message)
                 .putString(KEY_COMMENT, comment)
@@ -225,7 +223,7 @@ public class MainActivity extends Activity {
                 .remove(KEY_LAST_ERROR)
                 .apply();
         updateStatus();
-        Toast.makeText(this, "已重置；下次启动会重新学习", Toast.LENGTH_SHORT).show();
+        Toast.makeText(this, "控件识别记录已重置", Toast.LENGTH_SHORT).show();
     }
 
     private void openWeibo() {
@@ -241,11 +239,8 @@ public class MainActivity extends Activity {
         boolean on = enabled != null && enabled.toLowerCase().contains(getPackageName().toLowerCase());
         serviceStatus.setText(on ? "● 无障碍服务：已开启" : "● 无障碍服务：未开启");
         serviceStatus.setTextColor(on ? Color.rgb(0, 130, 70) : Color.rgb(190, 60, 0));
-        boolean learned = preferences.getBoolean(KEY_CALIBRATED, false);
-        learningStatus.setText(learned
-                ? "● 操作步骤：已学习，后续自动执行"
-                : "● 操作步骤：等待首次学习（首次仅确认两次）");
-        learningStatus.setTextColor(learned ? Color.rgb(0, 130, 70) : Color.rgb(190, 110, 0));
+        learningStatus.setText("● 模式：互关列表全自动；仅当天去重");
+        learningStatus.setTextColor(Color.rgb(0, 110, 150));
         String lastError = preferences.getString(KEY_LAST_ERROR, "").trim();
         if (lastError.isEmpty()) {
             errorStatus.setVisibility(View.GONE);

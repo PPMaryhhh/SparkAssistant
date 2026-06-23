@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">微博火花助手</string>
-    <string name="accessibility_description">识别微博消息页的火花会话，完成首次学习后自动发送续火花消息和主页评论。</string>
+    <string name="app_name">微博互关自动助手</string>
+    <string name="accessibility_description">从微博互相关注列表逐人完成私信和主页评论，并自动返回列表继续处理。</string>
 </resources>
