@@ -11,11 +11,18 @@ import android.provider.Settings;
 import android.text.InputType;
 import android.view.View;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
 
 public class MainActivity extends Activity {
     static final String PREFS = "spark_preferences";
@@ -33,6 +40,9 @@ public class MainActivity extends Activity {
     static final String KEY_COMMENT_INPUT_ID = "learned_comment_input_id";
     static final String KEY_COMMENT_SEND_ID = "learned_comment_send_id";
     static final String KEY_LAST_ERROR = "last_service_error";
+    static final String KEY_DISCOVERED_TARGETS = "discovered_mutual_targets";
+    static final String KEY_SELECTED_TARGETS = "selected_mutual_targets";
+    static final String KEY_SCAN_MODE = "scan_mutual_list_mode";
 
     private SharedPreferences preferences;
     private EditText messageInput;
@@ -42,6 +52,8 @@ public class MainActivity extends Activity {
     private TextView serviceStatus;
     private TextView learningStatus;
     private TextView errorStatus;
+    private TextView targetCountStatus;
+    private LinearLayout targetContainer;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -54,6 +66,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         updateStatus();
+        renderTargetList();
     }
 
     private View buildContent() {
@@ -90,8 +103,8 @@ public class MainActivity extends Activity {
                 preferences.getString(KEY_COMMENT, "踩踩宝贝"), false);
         delayInput = setting(root,
                 "③ 每步等待时间（秒）",
-                "给微博页面加载留时间；小米建议 4～8 秒，太短容易点错。",
-                String.valueOf(preferences.getInt(KEY_DELAY, 5)), true);
+                "想提速可设为 1～3 秒；页面加载慢或误点时再调高。",
+                String.valueOf(preferences.getInt(KEY_DELAY, 3)), true);
         limitInput = setting(root,
                 "④ 本轮最多处理人数（0 表示全部）",
                 "填 0 会一直处理到列表底部；当天已完成好友会自动跳过。",
@@ -101,6 +114,28 @@ public class MainActivity extends Activity {
         root.addView(button("开启/检查无障碍服务", v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))));
         root.addView(button("打开微博（然后进入“互相关注”列表）", v -> openWeibo()));
+
+        LinearLayout targetCard = card();
+        targetCard.addView(text("⑤ 选择需要打卡的互关好友", 17, Color.rgb(35, 35, 35)));
+        TextView targetHelp = text(
+                "先扫描互关列表，再勾选需要私信和评论的人。正式运行只处理已勾选对象。",
+                13, Color.GRAY);
+        targetHelp.setPadding(0, dp(3), 0, dp(6));
+        targetCard.addView(targetHelp);
+        targetCountStatus = text("", 14, Color.rgb(0, 110, 150));
+        targetCard.addView(targetCountStatus);
+        targetCard.addView(button("扫描/刷新互关名单", v -> startTargetScan()));
+        LinearLayout targetButtons = new LinearLayout(this);
+        targetButtons.setOrientation(LinearLayout.HORIZONTAL);
+        targetButtons.addView(smallActionButton("全选", v -> setAllTargets(true)));
+        targetButtons.addView(smallActionButton("全不选", v -> setAllTargets(false)));
+        targetButtons.addView(smallActionButton("保存选择", v -> saveTargetSelection()));
+        targetCard.addView(targetButtons);
+        targetContainer = new LinearLayout(this);
+        targetContainer.setOrientation(LinearLayout.VERTICAL);
+        targetCard.addView(targetContainer);
+        root.addView(targetCard);
+
         root.addView(button("重置微博页面控件识别", v -> resetLearning()));
         root.addView(button("清空今天的已处理记录", v -> {
             preferences.edit().remove(KEY_PROCESSED).apply();
@@ -111,8 +146,9 @@ public class MainActivity extends Activity {
                 "使用方法\n\n" +
                 "1. 保存设置并开启无障碍服务。\n" +
                 "2. 在微博进入“互相关注”好友列表。\n" +
-                "3. 点浮窗“开始”，之后自动完成：好友主页 → 私信 → 关闭输入状态 → 返回主页 → 评论 → 返回互关列表。\n" +
-                "4. 当前屏好友处理完后自动下滑，直到列表底部或达到人数上限。\n\n" +
+                "3. 第一次先点“扫描/刷新互关名单”，再在浮窗点“开始扫描”；扫描完回到本页勾选并保存。\n" +
+                "4. 再回互关列表点浮窗“开始”，只对已勾选好友自动私信和评论。\n" +
+                "5. 当前屏好友处理完后自动下滑，直到列表底部或达到人数上限。\n\n" +
                 "浮窗可随时暂停、跳过当前好友或停止。已完成好友只在当天去重；第二天会自动重新开始全部好友。",
                 15, Color.DKGRAY);
         guide.setPadding(0, dp(20), 0, dp(36));
@@ -190,6 +226,16 @@ public class MainActivity extends Activity {
         return button;
     }
 
+    private Button smallActionButton(String label, View.OnClickListener listener) {
+        Button button = new Button(this);
+        button.setText(label);
+        button.setTextSize(13);
+        button.setAllCaps(false);
+        button.setOnClickListener(listener);
+        button.setLayoutParams(new LinearLayout.LayoutParams(0, dp(46), 1));
+        return button;
+    }
+
     private void saveSettings() {
         String message = messageInput.getText().toString().trim();
         String comment = commentInput.getText().toString().trim();
@@ -197,7 +243,7 @@ public class MainActivity extends Activity {
             Toast.makeText(this, "消息和主页留言都不能为空", Toast.LENGTH_SHORT).show();
             return;
         }
-        int delay = clamp(parseInt(delayInput.getText().toString(), 5), 3, 15);
+        int delay = clamp(parseInt(delayInput.getText().toString(), 3), 1, 15);
         int limit = clamp(parseInt(limitInput.getText().toString(), 0), 0, 500);
         preferences.edit()
                 .putString(KEY_MESSAGE, message)
@@ -231,6 +277,67 @@ public class MainActivity extends Activity {
         Intent launch = getPackageManager().getLaunchIntentForPackage("com.sina.weibo");
         if (launch != null) startActivity(launch);
         else startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse("https://weibo.com")));
+    }
+
+    private void startTargetScan() {
+        saveSettings();
+        preferences.edit()
+                .putBoolean(KEY_SCAN_MODE, true)
+                .remove(KEY_DISCOVERED_TARGETS)
+                .apply();
+        Toast.makeText(this, "请进入微博互关列表，再点浮窗“开始扫描”", Toast.LENGTH_LONG).show();
+        openWeibo();
+    }
+
+    private void renderTargetList() {
+        if (targetContainer == null) return;
+        targetContainer.removeAllViews();
+        Set<String> discovered = preferences.getStringSet(KEY_DISCOVERED_TARGETS, new HashSet<>());
+        Set<String> selected = preferences.getStringSet(KEY_SELECTED_TARGETS, new HashSet<>());
+        List<String> entries = new ArrayList<>(discovered);
+        Collections.sort(entries);
+        targetCountStatus.setText("已扫描 " + entries.size() + " 人，已选择 " + selected.size() + " 人");
+        if (entries.isEmpty()) {
+            TextView empty = text("尚未扫描到名单", 14, Color.GRAY);
+            empty.setPadding(0, dp(8), 0, dp(4));
+            targetContainer.addView(empty);
+            return;
+        }
+        for (String entry : entries) {
+            String[] parts = entry.split("\\t", 2);
+            String name = parts[0];
+            String id = parts.length > 1 ? parts[1] : name;
+            CheckBox check = new CheckBox(this);
+            check.setText(name + "    ID：" + id);
+            check.setTextSize(15);
+            check.setTag(entry);
+            check.setChecked(selected.contains(entry));
+            targetContainer.addView(check);
+        }
+    }
+
+    private void setAllTargets(boolean checked) {
+        for (int i = 0; i < targetContainer.getChildCount(); i++) {
+            View child = targetContainer.getChildAt(i);
+            if (child instanceof CheckBox) ((CheckBox) child).setChecked(checked);
+        }
+    }
+
+    private void saveTargetSelection() {
+        Set<String> selected = new HashSet<>();
+        for (int i = 0; i < targetContainer.getChildCount(); i++) {
+            View child = targetContainer.getChildAt(i);
+            if (child instanceof CheckBox && ((CheckBox) child).isChecked()) {
+                selected.add(String.valueOf(child.getTag()));
+            }
+        }
+        preferences.edit().putStringSet(KEY_SELECTED_TARGETS, selected).apply();
+        targetCountStatus.setText("已扫描 " + countDiscovered() + " 人，已选择 " + selected.size() + " 人");
+        Toast.makeText(this, "已保存 " + selected.size() + " 位打卡好友", Toast.LENGTH_SHORT).show();
+    }
+
+    private int countDiscovered() {
+        return preferences.getStringSet(KEY_DISCOVERED_TARGETS, new HashSet<>()).size();
     }
 
     private void updateStatus() {
