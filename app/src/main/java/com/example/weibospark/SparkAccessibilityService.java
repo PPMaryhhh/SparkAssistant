@@ -54,6 +54,7 @@ public class SparkAccessibilityService extends AccessibilityService {
     private int sessionCount;
     private int backAttempts;
     private int scannedPages;
+    private int profileScrollAttempts;
     private boolean messagePasteTried;
     private boolean commentPasteTried;
 
@@ -156,6 +157,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             sessionCount = 0;
             backAttempts = 0;
             scannedPages = 0;
+            profileScrollAttempts = 0;
             currentUser = "";
             messagePasteTried = false;
             commentPasteTried = false;
@@ -285,6 +287,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo target = findProfileClickTarget(row, marker);
             if (target != null && clickNode(target)) {
                 currentUser = user;
+                profileScrollAttempts = 0;
                 state = State.WAIT_PROFILE;
                 setStatus("正在处理：“" + user + "” → 打开主页");
                 scheduleStep(delayMs());
@@ -412,7 +415,23 @@ public class SparkAccessibilityService extends AccessibilityService {
             setStatus("微博已打开，下一步点击屏幕底部的消息/评论图标");
             scheduleStep(delayMs());
         } else {
-            pauseWithNext("主页没有识别到可评论微博，请滚动主页后继续", State.OPEN_COMMENT);
+            AccessibilityNodeInfo scrollable = findLargestScrollable(root);
+            if (scrollable != null && profileScrollAttempts < 40
+                    && scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+                profileScrollAttempts++;
+                setStatus("当前屏没有可评论微博，正在自动下滑查找（第 "
+                        + profileScrollAttempts + " 次）…");
+                scheduleStep(delayMs());
+            } else {
+                // 私信已经发送成功。主页到底仍不可评论时记录当天已处理，避免重复私信。
+                rememberProcessedToday(currentUser);
+                sessionCount++;
+                state = State.RETURN_TO_LIST;
+                backAttempts = 0;
+                setStatus("“" + currentUser + "”主页已滑到底，未找到可评论微博；"
+                        + "已记录私信并返回互关列表");
+                scheduleStep(delayMs());
+            }
         }
     }
 
@@ -769,6 +788,32 @@ public class SparkAccessibilityService extends AccessibilityService {
             if (found != null) return found;
         }
         return null;
+    }
+
+    private AccessibilityNodeInfo findLargestScrollable(AccessibilityNodeInfo root) {
+        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
+        collectScrollable(root, nodes, 0);
+        AccessibilityNodeInfo best = null;
+        long bestArea = -1;
+        for (AccessibilityNodeInfo node : nodes) {
+            Rect bounds = new Rect();
+            node.getBoundsInScreen(bounds);
+            long area = (long) bounds.width() * bounds.height();
+            if (area > bestArea) {
+                bestArea = area;
+                best = node;
+            }
+        }
+        return best;
+    }
+
+    private void collectScrollable(AccessibilityNodeInfo node,
+                                   List<AccessibilityNodeInfo> result, int depth) {
+        if (node == null || depth > 16) return;
+        if (node.isVisibleToUser() && node.isScrollable()) result.add(node);
+        for (int i = 0; i < node.getChildCount(); i++) {
+            collectScrollable(node.getChild(i), result, depth + 1);
+        }
     }
 
     private AccessibilityNodeInfo findClickableAncestor(AccessibilityNodeInfo node, int maxLevels) {
