@@ -55,6 +55,8 @@ public class SparkAccessibilityService extends AccessibilityService {
     private int backAttempts;
     private int scannedPages;
     private int profileScrollAttempts;
+    private int unchangedProfileScrolls;
+    private String lastProfileFingerprint = "";
     private boolean messagePasteTried;
     private boolean commentPasteTried;
 
@@ -158,6 +160,8 @@ public class SparkAccessibilityService extends AccessibilityService {
             backAttempts = 0;
             scannedPages = 0;
             profileScrollAttempts = 0;
+            unchangedProfileScrolls = 0;
+            lastProfileFingerprint = "";
             currentUser = "";
             messagePasteTried = false;
             commentPasteTried = false;
@@ -288,6 +292,8 @@ public class SparkAccessibilityService extends AccessibilityService {
             if (target != null && clickNode(target)) {
                 currentUser = user;
                 profileScrollAttempts = 0;
+                unchangedProfileScrolls = 0;
+                lastProfileFingerprint = "";
                 state = State.WAIT_PROFILE;
                 setStatus("正在处理：“" + user + "” → 打开主页");
                 scheduleStep(delayMs());
@@ -415,11 +421,17 @@ public class SparkAccessibilityService extends AccessibilityService {
             setStatus("微博已打开，下一步点击屏幕底部的消息/评论图标");
             scheduleStep(delayMs());
         } else {
-            AccessibilityNodeInfo scrollable = findLargestScrollable(root);
-            if (scrollable != null && profileScrollAttempts < 40
-                    && scrollable.performAction(AccessibilityNodeInfo.ACTION_SCROLL_FORWARD)) {
+            String fingerprint = pageFingerprint(root);
+            if (!lastProfileFingerprint.isEmpty() && lastProfileFingerprint.equals(fingerprint)) {
+                unchangedProfileScrolls++;
+            } else {
+                unchangedProfileScrolls = 0;
+            }
+            lastProfileFingerprint = fingerprint;
+            if (profileScrollAttempts < 40 && unchangedProfileScrolls < 2
+                    && swipeProfileFromCenter()) {
                 profileScrollAttempts++;
-                setStatus("当前屏没有可评论微博，正在自动下滑查找（第 "
+                setStatus("当前屏没有可评论微博，正在从屏幕中部纵向滑动查找（第 "
                         + profileScrollAttempts + " 次）…");
                 scheduleStep(delayMs());
             } else {
@@ -790,29 +802,39 @@ public class SparkAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private AccessibilityNodeInfo findLargestScrollable(AccessibilityNodeInfo root) {
-        List<AccessibilityNodeInfo> nodes = new ArrayList<>();
-        collectScrollable(root, nodes, 0);
-        AccessibilityNodeInfo best = null;
-        long bestArea = -1;
-        for (AccessibilityNodeInfo node : nodes) {
-            Rect bounds = new Rect();
-            node.getBoundsInScreen(bounds);
-            long area = (long) bounds.width() * bounds.height();
-            if (area > bestArea) {
-                bestArea = area;
-                best = node;
-            }
-        }
-        return best;
+    private boolean swipeProfileFromCenter() {
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        Path path = new Path();
+        // 手指从内容区中下部向上划，页面向下浏览；不再调用相册等子控件的滚动动作。
+        path.moveTo(width * 0.50f, height * 0.68f);
+        path.lineTo(width * 0.50f, height * 0.30f);
+        GestureDescription.StrokeDescription stroke =
+                new GestureDescription.StrokeDescription(path, 0, 450);
+        return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
     }
 
-    private void collectScrollable(AccessibilityNodeInfo node,
-                                   List<AccessibilityNodeInfo> result, int depth) {
-        if (node == null || depth > 16) return;
-        if (node.isVisibleToUser() && node.isScrollable()) result.add(node);
+    private String pageFingerprint(AccessibilityNodeInfo root) {
+        StringBuilder value = new StringBuilder();
+        int[] count = new int[]{0};
+        collectFingerprint(root, value, count, 0);
+        return Integer.toHexString(value.toString().hashCode());
+    }
+
+    private void collectFingerprint(AccessibilityNodeInfo node, StringBuilder value,
+                                    int[] count, int depth) {
+        if (node == null || depth > 16 || count[0] >= 120) return;
+        if (node.isVisibleToUser()) {
+            String text = nodeText(node).trim();
+            if (!text.isEmpty()) {
+                Rect bounds = new Rect();
+                node.getBoundsInScreen(bounds);
+                value.append(text).append('@').append(bounds.top).append(':').append(bounds.bottom).append('|');
+                count[0]++;
+            }
+        }
         for (int i = 0; i < node.getChildCount(); i++) {
-            collectScrollable(node.getChild(i), result, depth + 1);
+            collectFingerprint(node.getChild(i), value, count, depth + 1);
         }
     }
 
