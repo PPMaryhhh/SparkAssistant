@@ -67,9 +67,6 @@ public class SparkAccessibilityService extends AccessibilityService {
     private int unchangedScanScrolls;
     private String lastScanFingerprint = "";
     private int scanPass;
-    private int messageCountBeforeSend;
-    private int messageSendVerifyAttempts;
-    private String messageSendMinute = "";
     private int commentCountBeforeSend;
     private int commentSendVerifyAttempts;
     private String commentSendMinute = "";
@@ -536,16 +533,12 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void clickMessageSend() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
-        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
-        messageCountBeforeSend = countVisibleNonEditableText(root, expected);
         if (!clickMessageSendButton(root)) {
             pauseWithNext("输入完成后仍没找到私信“发送”按钮，请调整页面后继续", State.CLICK_MESSAGE_SEND);
             return;
         }
-        messageSendMinute = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
-        messageSendVerifyAttempts = 0;
         state = State.VERIFY_MESSAGE_SENT;
-        setStatus("已点击发送，正在结合新消息数量、内容和时间确认是否成功…");
+        setStatus("已点击发送，等待检查是否出现重复内容或频率限制警告…");
         scheduleStep(Math.max(1500L, delayMs()));
     }
 
@@ -559,24 +552,12 @@ public class SparkAccessibilityService extends AccessibilityService {
                     + "等待限制解除后继续时将从下一位开始", State.RETURN_TO_LIST);
             return;
         }
-        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
-        int afterCount = countVisibleNonEditableText(root, expected);
-        if (afterCount > messageCountBeforeSend || hasRecentMessage(root, expected, messageSendMinute)) {
-            rememberProcessedToday(MainActivity.KEY_MESSAGE_PROCESSED, currentUser);
-            sessionCount++;
-            state = State.CLOSE_KEYBOARD;
-            setStatus("已确认私信发送成功，正在返回互关列表");
-            scheduleStep(delayMs());
-            return;
-        }
-        if (++messageSendVerifyAttempts < 3) {
-            setStatus("暂未确认私信成功，继续等待页面回执（"
-                    + messageSendVerifyAttempts + "/3）…");
-            scheduleStep(1200);
-        } else {
-            pauseWithNext("无法根据新消息数量、内容和时间确认发送成功，已暂停且未写入成功记录",
-                    State.VERIFY_MESSAGE_SENT);
-        }
+        // 私信不再做新增内容/时间验证；未出现明确警告即记为已私信。
+        rememberProcessedToday(MainActivity.KEY_MESSAGE_PROCESSED, currentUser);
+        sessionCount++;
+        state = State.CLOSE_KEYBOARD;
+        setStatus("未检测到私信限制警告，正在返回互关列表");
+        scheduleStep(delayMs());
     }
 
     private void closeMessageKeyboard() {
