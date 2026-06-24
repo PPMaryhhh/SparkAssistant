@@ -30,6 +30,11 @@ public class MainActivity extends Activity {
     static final String KEY_DELAY = "step_delay_seconds";
     static final String KEY_LIMIT = "mutual_session_limit";
     static final String KEY_PROCESSED = "processed_users";
+    static final String KEY_MESSAGE_PROCESSED = "message_processed_users";
+    static final String KEY_COMMENT_PROCESSED = "comment_processed_users";
+    static final String KEY_MESSAGE_WARNING_SKIPPED = "message_warning_skipped_users";
+    static final String KEY_COMMENT_WARNING_SKIPPED = "comment_warning_skipped_users";
+    static final String KEY_TASK_MODE = "selected_task_mode";
     static final String KEY_CALIBRATED = "workflow_calibrated";
     static final String KEY_SPARK_MARKER_ID = "learned_spark_marker_id";
     static final String KEY_MESSAGE_INPUT_ID = "learned_message_input_id";
@@ -77,7 +82,7 @@ public class MainActivity extends Activity {
 
         root.addView(text("微博互关自动助手", 27, Color.rgb(28, 28, 30)));
         TextView subtitle = text(
-                "从“互相关注”列表逐人进入主页，自动私信、评论、返回列表并继续下滑。",
+                "先扫描并勾选昵称，再分别执行批量私信或批量评论。",
                 15, Color.DKGRAY);
         subtitle.setPadding(0, dp(6), 0, dp(12));
         root.addView(subtitle);
@@ -98,7 +103,7 @@ public class MainActivity extends Activity {
                 preferences.getString(KEY_MESSAGE, "续个火花✨"), false);
         commentInput = setting(root,
                 "② 主页评论内容",
-                "私信完成后，在对方主页第一条可评论微博下发送。",
+                "批量评论任务中，在对方主页第一条可评论微博下发送。",
                 preferences.getString(KEY_COMMENT, "踩踩宝贝"), false);
         delayInput = setting(root,
                 "③ 每步等待时间（秒）",
@@ -130,6 +135,8 @@ public class MainActivity extends Activity {
         targetButtons.addView(smallActionButton("全不选", v -> setAllTargets(false)));
         targetButtons.addView(smallActionButton("保存选择", v -> saveTargetSelection()));
         targetCard.addView(targetButtons);
+        targetCard.addView(button("只执行批量私信", v -> prepareTask("message")));
+        targetCard.addView(button("只执行批量评论", v -> prepareTask("comment")));
         targetContainer = new LinearLayout(this);
         targetContainer.setOrientation(LinearLayout.VERTICAL);
         targetCard.addView(targetContainer);
@@ -137,16 +144,21 @@ public class MainActivity extends Activity {
 
         root.addView(button("重置微博页面控件识别", v -> resetLearning()));
         root.addView(button("清空今天的已处理记录", v -> {
-            preferences.edit().remove(KEY_PROCESSED).apply();
-            Toast.makeText(this, "今天的记录已清空", Toast.LENGTH_SHORT).show();
+            preferences.edit()
+                    .remove(KEY_MESSAGE_PROCESSED)
+                    .remove(KEY_COMMENT_PROCESSED)
+                    .remove(KEY_MESSAGE_WARNING_SKIPPED)
+                    .remove(KEY_COMMENT_WARNING_SKIPPED)
+                    .apply();
+            Toast.makeText(this, "今天的私信和评论记录已清空", Toast.LENGTH_SHORT).show();
         }));
 
         TextView guide = text(
                 "使用方法\n\n" +
                 "1. 保存设置并开启无障碍服务。\n" +
                 "2. 在微博进入“互相关注”好友列表。\n" +
-                "3. 第一次先点“扫描/刷新互关名单”，再在浮窗点“开始扫描”；扫描完回到本页勾选并保存。\n" +
-                "4. 再回互关列表点浮窗“开始”，只对已勾选好友自动私信和评论。\n" +
+                "3. 直接在互关列表点浮窗“扫描名单”；程序回顶后小步扫描两遍。\n" +
+                "4. 回本页勾选并保存，再回互关列表点“发私信”或“发评论”。两个任务完全独立。\n" +
                 "5. 当前屏好友处理完后自动下滑，直到列表底部或达到人数上限。\n\n" +
                 "浮窗可随时暂停、跳过当前好友或停止。已完成好友只在当天去重；第二天会自动重新开始全部好友。",
                 15, Color.DKGRAY);
@@ -284,7 +296,7 @@ public class MainActivity extends Activity {
                 .putBoolean(KEY_SCAN_MODE, true)
                 .remove(KEY_DISCOVERED_TARGETS)
                 .apply();
-        Toast.makeText(this, "扫描模式已开启：请回到刚才打开的微博互关界面，再点浮窗“开始扫描”",
+        Toast.makeText(this, "扫描模式已开启：请回到微博互关界面，再点浮窗“扫描名单”",
                 Toast.LENGTH_LONG).show();
         // 不重新启动微博，也不打开网页；将本 App 放到后台，露出用户原先保持的微博页面。
         moveTaskToBack(true);
@@ -305,11 +317,9 @@ public class MainActivity extends Activity {
             return;
         }
         for (String entry : entries) {
-            String[] parts = entry.split("\\t", 2);
-            String name = parts[0];
-            String id = parts.length > 1 ? parts[1] : name;
+            String name = entry.split("\\t", 2)[0];
             CheckBox check = new CheckBox(this);
-            check.setText(name + "    ID：" + id);
+            check.setText(name);
             check.setTextSize(15);
             check.setTag(entry);
             check.setChecked(selected.contains(entry));
@@ -341,13 +351,26 @@ public class MainActivity extends Activity {
         return preferences.getStringSet(KEY_DISCOVERED_TARGETS, new HashSet<>()).size();
     }
 
+    private void prepareTask(String mode) {
+        saveSettings();
+        saveTargetSelection();
+        preferences.edit()
+                .putString(KEY_TASK_MODE, mode)
+                .putBoolean(KEY_SCAN_MODE, false)
+                .apply();
+        String label = mode.equals("message") ? "批量私信" : "批量评论";
+        Toast.makeText(this, label + "已准备，请回到互关列表点击浮窗对应按钮",
+                Toast.LENGTH_LONG).show();
+        moveTaskToBack(true);
+    }
+
     private void updateStatus() {
         String enabled = Settings.Secure.getString(getContentResolver(),
                 Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES);
         boolean on = enabled != null && enabled.toLowerCase().contains(getPackageName().toLowerCase());
         serviceStatus.setText(on ? "● 无障碍服务：已开启" : "● 无障碍服务：未开启");
         serviceStatus.setTextColor(on ? Color.rgb(0, 130, 70) : Color.rgb(190, 60, 0));
-        learningStatus.setText("● 模式：互关列表全自动；仅当天去重");
+        learningStatus.setText("● 模式：名单扫描、私信、评论三项独立；仅当天去重");
         learningStatus.setTextColor(Color.rgb(0, 110, 150));
         String lastError = preferences.getString(KEY_LAST_ERROR, "").trim();
         if (lastError.isEmpty()) {

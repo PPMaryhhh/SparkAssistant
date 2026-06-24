@@ -30,18 +30,18 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class SparkAccessibilityService extends AccessibilityService {
     private static final String TAG = "WeiboMutualService";
 
     private enum State {
-        IDLE, SCAN_LIST, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE, VERIFY_MESSAGE_TEXT, CLICK_MESSAGE_SEND,
-        CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, OPEN_COMMENT_INPUT,
-        WAIT_COMMENT_INPUT, SEND_COMMENT, VERIFY_COMMENT_TEXT, CLICK_COMMENT_SEND,
+        IDLE, SCAN_TO_TOP, SCAN_LIST, FIND_TARGET, WAIT_PROFILE, WAIT_CHAT, SEND_MESSAGE, VERIFY_MESSAGE_TEXT, CLICK_MESSAGE_SEND,
+        VERIFY_MESSAGE_SENT, CLOSE_KEYBOARD, BACK_TO_PROFILE, OPEN_COMMENT, OPEN_COMMENT_INPUT,
+        WAIT_COMMENT_INPUT, SEND_COMMENT, VERIFY_COMMENT_TEXT, CLICK_COMMENT_SEND, VERIFY_COMMENT_SENT,
         RETURN_TO_LIST, PAUSED
     }
+
+    private enum TaskMode { MESSAGE, COMMENT, SCAN }
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final Runnable stepRunnable = this::runStep;
@@ -53,6 +53,8 @@ public class SparkAccessibilityService extends AccessibilityService {
     private TextView status;
     private Button primary;
     private Button secondary;
+    private Button tertiary;
+    private TaskMode taskMode = TaskMode.MESSAGE;
     private String currentUser = "";
     private int sessionCount;
     private int backAttempts;
@@ -64,6 +66,13 @@ public class SparkAccessibilityService extends AccessibilityService {
     private boolean commentPasteTried;
     private int unchangedScanScrolls;
     private String lastScanFingerprint = "";
+    private int scanPass;
+    private int messageCountBeforeSend;
+    private int messageSendVerifyAttempts;
+    private String messageSendMinute = "";
+    private int commentCountBeforeSend;
+    private int commentSendVerifyAttempts;
+    private String commentSendMinute = "";
 
     @Override
     protected void onServiceConnected() {
@@ -86,11 +95,6 @@ public class SparkAccessibilityService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         // 每个动作都会安排下一步。这里不因页面刷新事件提前执行，避免输入文字后
         // “发送/评论”按钮尚未生成就立即查找并误报失败。
-        if (state == State.IDLE && primary != null) {
-            boolean scanMode = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                    .getBoolean(MainActivity.KEY_SCAN_MODE, false);
-            primary.setText(scanMode ? "开始扫描" : "开始");
-        }
     }
 
     @Override
@@ -124,15 +128,15 @@ public class SparkAccessibilityService extends AccessibilityService {
 
         LinearLayout buttons = new LinearLayout(this);
         buttons.setOrientation(LinearLayout.HORIZONTAL);
-        primary = smallButton("开始");
+        primary = smallButton("发私信");
         primary.setOnClickListener(v -> onPrimary());
-        secondary = smallButton("扫描名单");
+        secondary = smallButton("发评论");
         secondary.setOnClickListener(v -> onSecondary());
-        Button stop = smallButton("停止");
-        stop.setOnClickListener(v -> stopTask("任务已停止"));
+        tertiary = smallButton("扫描名单");
+        tertiary.setOnClickListener(v -> onTertiary());
         buttons.addView(primary);
         buttons.addView(secondary);
-        buttons.addView(stop);
+        buttons.addView(tertiary);
         overlay.addView(buttons);
 
         WindowManager.LayoutParams params = new WindowManager.LayoutParams(
@@ -166,27 +170,7 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void onPrimary() {
         if (state == State.IDLE) {
-            sessionCount = 0;
-            backAttempts = 0;
-            scannedPages = 0;
-            profileScrollAttempts = 0;
-            unchangedProfileScrolls = 0;
-            lastProfileFingerprint = "";
-            currentUser = "";
-            messagePasteTried = false;
-            commentPasteTried = false;
-            skippedThisSession.clear();
-            boolean scanMode = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                    .getBoolean(MainActivity.KEY_SCAN_MODE, false);
-            unchangedScanScrolls = 0;
-            lastScanFingerprint = "";
-            state = scanMode ? State.SCAN_LIST : State.FIND_TARGET;
-            primary.setText("暂停");
-            secondary.setText(scanMode ? "扫描中" : "跳过此人");
-            setStatus(scanMode
-                    ? "扫描模式：正在收集互关昵称和可见 ID，不会发送消息"
-                    : "全自动模式：只处理已勾选且当天未完成的好友…");
-            scheduleStep(250);
+            startTask(TaskMode.MESSAGE);
         } else if (state == State.PAUSED) {
             state = stateBeforePause;
             primary.setText("暂停");
@@ -199,14 +183,52 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void onSecondary() {
         if (state == State.IDLE) {
+            startTask(TaskMode.COMMENT);
+        } else if (state != State.SCAN_LIST && state != State.SCAN_TO_TOP) {
+            skipCurrentUser();
+        }
+    }
+
+    private void onTertiary() {
+        if (state == State.IDLE) startTask(TaskMode.SCAN);
+        else stopTask("任务已停止");
+    }
+
+    private void startTask(TaskMode mode) {
+        taskMode = mode;
+        sessionCount = 0;
+        backAttempts = 0;
+        scannedPages = 0;
+        profileScrollAttempts = 0;
+        unchangedProfileScrolls = 0;
+        lastProfileFingerprint = "";
+        currentUser = "";
+        messagePasteTried = false;
+        commentPasteTried = false;
+        unchangedScanScrolls = 0;
+        lastScanFingerprint = "";
+        scanPass = 0;
+        skippedThisSession.clear();
+        if (mode == TaskMode.SCAN) {
             getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                     .putBoolean(MainActivity.KEY_SCAN_MODE, true)
                     .remove(MainActivity.KEY_DISCOVERED_TARGETS)
                     .apply();
-            onPrimary();
-        } else if (state != State.SCAN_LIST) {
-            skipCurrentUser();
+            state = State.SCAN_TO_TOP;
+            setStatus("扫描模式：先自动回到互关列表顶部，不会发送消息");
+        } else {
+            getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
+                    .putString(MainActivity.KEY_TASK_MODE, mode == TaskMode.MESSAGE ? "message" : "comment")
+                    .putBoolean(MainActivity.KEY_SCAN_MODE, false).apply();
+            state = State.FIND_TARGET;
+            setStatus(mode == TaskMode.MESSAGE
+                    ? "私信模式：只处理已勾选且今天未私信的好友"
+                    : "评论模式：只处理已勾选且今天未评论的好友");
         }
+        primary.setText("暂停");
+        secondary.setText("跳过此人");
+        tertiary.setText("停止");
+        scheduleStep(250);
     }
 
     private void skipCurrentUser() {
@@ -247,6 +269,9 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         switch (state) {
+            case SCAN_TO_TOP:
+                scanBackToTop();
+                break;
             case SCAN_LIST:
                 scanMutualList();
                 break;
@@ -267,6 +292,9 @@ public class SparkAccessibilityService extends AccessibilityService {
                 break;
             case CLICK_MESSAGE_SEND:
                 clickMessageSend();
+                break;
+            case VERIFY_MESSAGE_SENT:
+                verifyMessageSent();
                 break;
             case CLOSE_KEYBOARD:
                 closeMessageKeyboard();
@@ -292,6 +320,9 @@ public class SparkAccessibilityService extends AccessibilityService {
             case CLICK_COMMENT_SEND:
                 clickCommentSend();
                 break;
+            case VERIFY_COMMENT_SENT:
+                verifyCommentSent();
+                break;
             case RETURN_TO_LIST:
                 returnToMutualList();
                 break;
@@ -311,7 +342,10 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
 
-        Set<String> processed = getProcessedToday();
+        Set<String> processed = getProcessedToday(taskMode == TaskMode.MESSAGE
+                ? MainActivity.KEY_MESSAGE_PROCESSED : MainActivity.KEY_COMMENT_PROCESSED);
+        Set<String> warningSkipped = getProcessedToday(MainActivity.KEY_MESSAGE_WARNING_SKIPPED);
+        Set<String> commentWarningSkipped = getProcessedToday(MainActivity.KEY_COMMENT_WARNING_SKIPPED);
         if (getSelectedTargets().isEmpty()) {
             stopTask("尚未选择需要打卡的好友，请先在 App 中扫描并勾选名单");
             return;
@@ -324,14 +358,16 @@ public class SparkAccessibilityService extends AccessibilityService {
             if (user.isEmpty()) continue;
             identifiedRows++;
             if (!isSelectedUser(user)) continue;
-            if (processed.contains(todayKey(user)) || skippedThisSession.contains(user)) continue;
+            if (processed.contains(todayKey(user)) || skippedThisSession.contains(user)
+                    || (taskMode == TaskMode.MESSAGE && warningSkipped.contains(todayKey(user)))) continue;
+            if (taskMode == TaskMode.COMMENT && commentWarningSkipped.contains(todayKey(user))) continue;
             AccessibilityNodeInfo target = findProfileClickTarget(row, marker);
             if (target != null && clickNode(target)) {
                 currentUser = user;
                 profileScrollAttempts = 0;
                 unchangedProfileScrolls = 0;
                 lastProfileFingerprint = "";
-                state = State.WAIT_PROFILE;
+                state = taskMode == TaskMode.MESSAGE ? State.WAIT_PROFILE : State.OPEN_COMMENT;
                 setStatus("正在处理：“" + user + "” → 打开主页");
                 scheduleStep(delayMs());
                 return;
@@ -359,41 +395,86 @@ public class SparkAccessibilityService extends AccessibilityService {
         }
         Set<String> discovered = new HashSet<>(getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
                 .getStringSet(MainActivity.KEY_DISCOVERED_TARGETS, new HashSet<>()));
-        int beforeCount = discovered.size();
-        int readableRows = 0;
-        for (AccessibilityNodeInfo marker : findTargetMarkers(root)) {
-            AccessibilityNodeInfo row = findLikelyRow(marker);
-            String name = extractUserLabel(row);
-            if (!name.isEmpty()) {
-                readableRows++;
-                discovered.add(name + "\t" + extractVisibleId(row, name));
-            }
-        }
+        Set<String> visibleNames = visibleUserNames(root);
+        discovered.addAll(visibleNames);
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                 .putStringSet(MainActivity.KEY_DISCOVERED_TARGETS, discovered).apply();
 
-        if (scannedPages == 0 && beforeCount == 0 && readableRows == 0) {
+        if (scannedPages == 0 && discovered.isEmpty()) {
             pauseWithNext("已识别为互关列表，但当前屏读不到任何好友昵称；请确认使用官方微博 App并把列表截图发来",
                     State.SCAN_LIST);
             return;
         }
 
-        String fingerprint = pageFingerprint(root);
+        String fingerprint = namesFingerprint(visibleNames);
         if (!lastScanFingerprint.isEmpty() && lastScanFingerprint.equals(fingerprint)) {
             unchangedScanScrolls++;
         } else {
             unchangedScanScrolls = 0;
         }
         lastScanFingerprint = fingerprint;
-        if (scannedPages < 100 && unchangedScanScrolls < 2 && swipeListFromCenter()) {
+        if (scannedPages < 300 && unchangedScanScrolls < 3 && swipeListFromCenter()) {
             scannedPages++;
             setStatus("已收集 " + discovered.size() + " 人，继续扫描列表…");
             scheduleStep(Math.max(800L, delayMs()));
+        } else if (scanPass == 0) {
+            scanPass = 1;
+            state = State.SCAN_TO_TOP;
+            scannedPages = 0;
+            unchangedScanScrolls = 0;
+            lastScanFingerprint = "";
+            setStatus("第一轮扫描完成，共 " + discovered.size()
+                    + " 人；正在回到顶部进行第二轮补漏…");
+            scheduleStep(700);
         } else {
             getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                     .putBoolean(MainActivity.KEY_SCAN_MODE, false).apply();
-            stopTask("扫描完成，共获取 " + discovered.size() + " 人；请回 App 勾选并保存");
+            stopTask("两轮扫描完成，共获取 " + discovered.size()
+                    + " 个去重昵称；请回 App 勾选并保存");
         }
+    }
+
+    private void scanBackToTop() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null || !looksLikeMutualList(root)) {
+            pauseWithNext("扫描模式：请停在微博“互相关注”列表后继续", State.SCAN_TO_TOP);
+            return;
+        }
+        String fingerprint = namesFingerprint(visibleUserNames(root));
+        if (!lastScanFingerprint.isEmpty() && lastScanFingerprint.equals(fingerprint)) {
+            unchangedScanScrolls++;
+        } else {
+            unchangedScanScrolls = 0;
+        }
+        lastScanFingerprint = fingerprint;
+        if (unchangedScanScrolls >= 2) {
+            state = State.SCAN_LIST;
+            scannedPages = 0;
+            unchangedScanScrolls = 0;
+            lastScanFingerprint = "";
+            setStatus("已回到列表顶部，开始小步重叠扫描昵称…");
+            scheduleStep(500);
+        } else if (swipeListTowardTop()) {
+            setStatus("正在自动返回互关列表顶部…");
+            scheduleStep(Math.max(700L, delayMs()));
+        } else {
+            pauseWithNext("无法滑回列表顶部，请手动回到顶部后继续", State.SCAN_TO_TOP);
+        }
+    }
+
+    private Set<String> visibleUserNames(AccessibilityNodeInfo root) {
+        Set<String> names = new HashSet<>();
+        for (AccessibilityNodeInfo marker : findTargetMarkers(root)) {
+            String name = extractUserLabel(findLikelyRow(marker));
+            if (!name.isEmpty()) names.add(name);
+        }
+        return names;
+    }
+
+    private String namesFingerprint(Set<String> names) {
+        List<String> sorted = new ArrayList<>(names);
+        java.util.Collections.sort(sorted);
+        return sorted.toString();
     }
 
     private void openPrivateChat() {
@@ -455,13 +536,47 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private void clickMessageSend() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
+        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
+        messageCountBeforeSend = countVisibleNonEditableText(root, expected);
         if (!clickMessageSendButton(root)) {
             pauseWithNext("输入完成后仍没找到私信“发送”按钮，请调整页面后继续", State.CLICK_MESSAGE_SEND);
             return;
         }
-        state = State.CLOSE_KEYBOARD;
-        setStatus("私信已发送，正在关闭输入状态并返回主页");
-        scheduleStep(delayMs());
+        messageSendMinute = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+        messageSendVerifyAttempts = 0;
+        state = State.VERIFY_MESSAGE_SENT;
+        setStatus("已点击发送，正在结合新消息数量、内容和时间确认是否成功…");
+        scheduleStep(Math.max(1500L, delayMs()));
+    }
+
+    private void verifyMessageSent() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (hasAnyWarning(root, "内容相同", "十分钟", "10分钟", "发布频繁", "操作频繁",
+                "稍后再试", "发送失败", "请勿重复")) {
+            rememberProcessedToday(MainActivity.KEY_MESSAGE_WARNING_SKIPPED, currentUser);
+            skippedThisSession.add(currentUser);
+            pauseWithNext("检测到重复内容/频率限制，私信未计为成功；任务已暂停。"
+                    + "等待限制解除后继续时将从下一位开始", State.RETURN_TO_LIST);
+            return;
+        }
+        String expected = prefString(MainActivity.KEY_MESSAGE, "续个火花✨");
+        int afterCount = countVisibleNonEditableText(root, expected);
+        if (afterCount > messageCountBeforeSend || hasRecentMessage(root, expected, messageSendMinute)) {
+            rememberProcessedToday(MainActivity.KEY_MESSAGE_PROCESSED, currentUser);
+            sessionCount++;
+            state = State.CLOSE_KEYBOARD;
+            setStatus("已确认私信发送成功，正在返回互关列表");
+            scheduleStep(delayMs());
+            return;
+        }
+        if (++messageSendVerifyAttempts < 3) {
+            setStatus("暂未确认私信成功，继续等待页面回执（"
+                    + messageSendVerifyAttempts + "/3）…");
+            scheduleStep(1200);
+        } else {
+            pauseWithNext("无法根据新消息数量、内容和时间确认发送成功，已暂停且未写入成功记录",
+                    State.VERIFY_MESSAGE_SENT);
+        }
     }
 
     private void closeMessageKeyboard() {
@@ -482,8 +597,9 @@ public class SparkAccessibilityService extends AccessibilityService {
             return;
         }
         performGlobalAction(GLOBAL_ACTION_BACK);
-        state = State.OPEN_COMMENT;
-        setStatus("已退出私信，正在主页寻找可评论微博");
+        state = State.RETURN_TO_LIST;
+        backAttempts = 0;
+        setStatus("已退出私信，正在返回互关列表继续下一位");
         scheduleStep(delayMs());
     }
 
@@ -517,13 +633,13 @@ public class SparkAccessibilityService extends AccessibilityService {
                         + profileScrollAttempts + " 次）…");
                 scheduleStep(delayMs());
             } else {
-                // 私信已经发送成功。主页到底仍不可评论时记录当天已处理，避免重复私信。
-                rememberProcessedToday(currentUser);
+                // 评论任务中主页到底仍不可评论时记录当天已检查，避免反复进入同一对象。
+                rememberProcessedToday(MainActivity.KEY_COMMENT_PROCESSED, currentUser);
                 sessionCount++;
                 state = State.RETURN_TO_LIST;
                 backAttempts = 0;
                 setStatus("“" + currentUser + "”主页已滑到底，未找到可评论微博；"
-                        + "已记录私信并返回互关列表");
+                        + "已记录本次评论检查并返回互关列表");
                 scheduleStep(delayMs());
             }
         }
@@ -599,16 +715,49 @@ public class SparkAccessibilityService extends AccessibilityService {
     private void clickCommentSend() {
         AccessibilityNodeInfo root = getRootInActiveWindow();
         AccessibilityNodeInfo edit = findEditableLearned(root, MainActivity.KEY_COMMENT_INPUT_ID);
+        String expected = prefString(MainActivity.KEY_COMMENT, "踩踩宝贝");
+        commentCountBeforeSend = countVisibleNonEditableText(root, expected);
         if (!clickCommentSendButton(root, edit)) {
             pauseWithNext("输入完成后没找到提交评论的“评论”按钮，请调整页面后继续", State.CLICK_COMMENT_SEND);
             return;
         }
-        rememberProcessedToday(currentUser);
-        sessionCount++;
-        state = State.RETURN_TO_LIST;
-        backAttempts = 0;
-        setStatus("已完成：“" + currentUser + "”（本次 " + sessionCount + " 人），正在返回互关列表");
-        scheduleStep(delayMs());
+        commentSendMinute = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+        commentSendVerifyAttempts = 0;
+        state = State.VERIFY_COMMENT_SENT;
+        setStatus("已点击评论，正在结合新增内容和时间确认是否成功…");
+        scheduleStep(Math.max(1500L, delayMs()));
+    }
+
+    private void verifyCommentSent() {
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (hasAnyWarning(root, "内容相同", "十分钟", "10分钟", "发布频繁", "操作频繁",
+                "稍后再试", "评论失败", "请勿重复")) {
+            rememberProcessedToday(MainActivity.KEY_COMMENT_WARNING_SKIPPED, currentUser);
+            skippedThisSession.add(currentUser);
+            pauseWithNext("检测到评论频率/重复限制，评论未计为成功；任务已暂停。"
+                    + "继续时将从下一位开始", State.RETURN_TO_LIST);
+            return;
+        }
+        String expected = prefString(MainActivity.KEY_COMMENT, "踩踩宝贝");
+        int afterCount = countVisibleNonEditableText(root, expected);
+        if (afterCount > commentCountBeforeSend || hasRecentMessage(root, expected, commentSendMinute)) {
+            rememberProcessedToday(MainActivity.KEY_COMMENT_PROCESSED, currentUser);
+            sessionCount++;
+            state = State.RETURN_TO_LIST;
+            backAttempts = 0;
+            setStatus("已确认评论成功：“" + currentUser + "”（本次 " + sessionCount
+                    + " 人），正在返回互关列表");
+            scheduleStep(delayMs());
+            return;
+        }
+        if (++commentSendVerifyAttempts < 3) {
+            setStatus("暂未确认评论成功，继续等待页面回执（"
+                    + commentSendVerifyAttempts + "/3）…");
+            scheduleStep(1200);
+        } else {
+            pauseWithNext("无法根据新增评论内容和时间确认成功，已暂停且未写入已评论记录",
+                    State.VERIFY_COMMENT_SENT);
+        }
     }
 
     private void returnToMutualList() {
@@ -665,22 +814,6 @@ public class SparkAccessibilityService extends AccessibilityService {
             return clean;
         }
         return "";
-    }
-
-    private String extractVisibleId(AccessibilityNodeInfo row, String fallbackName) {
-        List<String> values = new ArrayList<>();
-        collectText(row, values, 0);
-        Pattern idPattern = Pattern.compile("(?i)(?:微博)?ID\\s*[:：]\\s*([A-Za-z0-9_.-]+)");
-        for (String value : values) {
-            Matcher matcher = idPattern.matcher(value);
-            if (matcher.find()) return matcher.group(1);
-            String clean = value.trim();
-            if (clean.startsWith("@") && clean.length() > 1 && !clean.contains(" ")) {
-                return clean.substring(1);
-            }
-        }
-        // 互关列表通常不暴露数字 UID；此时使用昵称作为稳定选择标识。
-        return fallbackName;
     }
 
     private AccessibilityNodeInfo findProfileClickTarget(AccessibilityNodeInfo row,
@@ -916,8 +1049,20 @@ public class SparkAccessibilityService extends AccessibilityService {
         int width = getResources().getDisplayMetrics().widthPixels;
         int height = getResources().getDisplayMetrics().heightPixels;
         Path path = new Path();
-        path.moveTo(width * 0.50f, height * 0.76f);
-        path.lineTo(width * 0.50f, height * 0.32f);
+        // 小步上划并保留大量重叠，避免一次跨过多行导致漏扫。
+        path.moveTo(width * 0.50f, height * 0.70f);
+        path.lineTo(width * 0.50f, height * 0.50f);
+        GestureDescription.StrokeDescription stroke =
+                new GestureDescription.StrokeDescription(path, 0, 420);
+        return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
+    }
+
+    private boolean swipeListTowardTop() {
+        int width = getResources().getDisplayMetrics().widthPixels;
+        int height = getResources().getDisplayMetrics().heightPixels;
+        Path path = new Path();
+        path.moveTo(width * 0.50f, height * 0.34f);
+        path.lineTo(width * 0.50f, height * 0.76f);
         GestureDescription.StrokeDescription stroke =
                 new GestureDescription.StrokeDescription(path, 0, 420);
         return dispatchGesture(new GestureDescription.Builder().addStroke(stroke).build(), null, null);
@@ -998,6 +1143,55 @@ public class SparkAccessibilityService extends AccessibilityService {
         return false;
     }
 
+    private int countVisibleNonEditableText(AccessibilityNodeInfo root, String expected) {
+        if (root == null || expected == null || expected.isEmpty()) return 0;
+        int count = 0;
+        for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(expected)) {
+            if (node.isVisibleToUser() && !isInsideEditable(node)) count++;
+        }
+        return count;
+    }
+
+    private boolean isInsideEditable(AccessibilityNodeInfo node) {
+        AccessibilityNodeInfo current = node;
+        for (int i = 0; i < 4 && current != null; i++) {
+            if (current.isEditable()
+                    || "android.widget.EditText".contentEquals(current.getClassName())) return true;
+            current = current.getParent();
+        }
+        return false;
+    }
+
+    private boolean hasRecentMessage(AccessibilityNodeInfo root, String expected, String sentMinute) {
+        if (root == null) return false;
+        String now = new SimpleDateFormat("HH:mm", Locale.CHINA).format(new Date());
+        String previous = new SimpleDateFormat("HH:mm", Locale.CHINA)
+                .format(new Date(System.currentTimeMillis() - 60_000L));
+        for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(expected)) {
+            if (!node.isVisibleToUser() || isInsideEditable(node)) continue;
+            AccessibilityNodeInfo container = node;
+            for (int i = 0; i < 5 && container != null; i++) {
+                List<String> values = new ArrayList<>();
+                collectText(container, values, 0);
+                String joined = values.toString();
+                if (joined.contains(expected) && (joined.contains(sentMinute)
+                        || joined.contains(now) || joined.contains(previous))) return true;
+                container = container.getParent();
+            }
+        }
+        return false;
+    }
+
+    private boolean hasAnyWarning(AccessibilityNodeInfo root, String... warnings) {
+        if (root == null) return false;
+        for (String warning : warnings) {
+            for (AccessibilityNodeInfo node : root.findAccessibilityNodeInfosByText(warning)) {
+                if (node.isVisibleToUser()) return true;
+            }
+        }
+        return false;
+    }
+
     private void collectText(AccessibilityNodeInfo node, List<String> result, int depth) {
         if (node == null || depth > 6) return;
         if (node.getText() != null && !node.getText().toString().trim().isEmpty())
@@ -1062,9 +1256,9 @@ public class SparkAccessibilityService extends AccessibilityService {
                 && "com.sina.weibo".contentEquals(root.getPackageName());
     }
 
-    private Set<String> getProcessedToday() {
+    private Set<String> getProcessedToday(String storageKey) {
         Set<String> saved = getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                .getStringSet(MainActivity.KEY_PROCESSED, new HashSet<>());
+                .getStringSet(storageKey, new HashSet<>());
         Set<String> todayValues = new HashSet<>();
         String prefix = today() + "|";
         for (String value : saved) if (value.startsWith(prefix)) todayValues.add(value);
@@ -1085,14 +1279,14 @@ public class SparkAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    private void rememberProcessedToday(String user) {
+    private void rememberProcessedToday(String storageKey, String user) {
         Set<String> saved = new HashSet<>(getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE)
-                .getStringSet(MainActivity.KEY_PROCESSED, new HashSet<>()));
+                .getStringSet(storageKey, new HashSet<>()));
         String prefix = today() + "|";
         saved.removeIf(value -> !value.startsWith(prefix));
         saved.add(todayKey(user));
         getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
-                .putStringSet(MainActivity.KEY_PROCESSED, saved).apply();
+                .putStringSet(storageKey, saved).apply();
     }
 
     private String todayKey(String user) {
@@ -1131,8 +1325,9 @@ public class SparkAccessibilityService extends AccessibilityService {
     }
 
     private void stopTask(String reason) {
-        boolean wasScanning = state == State.SCAN_LIST
-                || (state == State.PAUSED && stateBeforePause == State.SCAN_LIST);
+        boolean wasScanning = state == State.SCAN_LIST || state == State.SCAN_TO_TOP
+                || (state == State.PAUSED
+                && (stateBeforePause == State.SCAN_LIST || stateBeforePause == State.SCAN_TO_TOP));
         state = State.IDLE;
         handler.removeCallbacks(stepRunnable);
         currentUser = "";
@@ -1140,8 +1335,9 @@ public class SparkAccessibilityService extends AccessibilityService {
             getSharedPreferences(MainActivity.PREFS, MODE_PRIVATE).edit()
                     .putBoolean(MainActivity.KEY_SCAN_MODE, false).apply();
         }
-        if (primary != null) primary.setText("开始");
-        if (secondary != null) secondary.setText("扫描名单");
+        if (primary != null) primary.setText("发私信");
+        if (secondary != null) secondary.setText("发评论");
+        if (tertiary != null) tertiary.setText("扫描名单");
         setStatus(reason);
     }
 
@@ -1181,6 +1377,7 @@ public class SparkAccessibilityService extends AccessibilityService {
 
     private String stateLabel(State value) {
         switch (value) {
+            case SCAN_TO_TOP: return "返回列表顶部";
             case SCAN_LIST: return "扫描互关名单";
             case FIND_TARGET: return "寻找下一位互关好友";
             case WAIT_PROFILE: return "打开好友主页和私信";
@@ -1188,6 +1385,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             case SEND_MESSAGE: return "填写私信";
             case VERIFY_MESSAGE_TEXT: return "确认私信文字已显示";
             case CLICK_MESSAGE_SEND: return "点击私信发送按钮";
+            case VERIFY_MESSAGE_SENT: return "确认私信是否成功";
             case CLOSE_KEYBOARD: return "关闭输入状态";
             case BACK_TO_PROFILE: return "返回好友主页";
             case OPEN_COMMENT: return "打开微博评论";
@@ -1196,6 +1394,7 @@ public class SparkAccessibilityService extends AccessibilityService {
             case SEND_COMMENT: return "填写评论";
             case VERIFY_COMMENT_TEXT: return "确认评论文字已显示";
             case CLICK_COMMENT_SEND: return "点击评论按钮";
+            case VERIFY_COMMENT_SENT: return "确认评论是否成功";
             case RETURN_TO_LIST: return "返回互关列表";
             default: return "继续执行";
         }
